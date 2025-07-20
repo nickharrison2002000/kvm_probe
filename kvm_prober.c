@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <time.h>
+#include <linux/virtio_ids.h>
 
 #define DEVICE_PATH "/dev/kvm_probe_dev"
 
@@ -29,6 +30,9 @@
 #define IOCTL_SCAN_VA            0x1010
 #define IOCTL_WRITE_VA           0x1011
 #define IOCTL_HYPERCALL_ARGS     0x1012
+#define IOCTL_ATTACH_VQ          0x1013
+#define IOCTL_TRIGGER_VQ         0x1014
+#define IOCTL_SCAN_PHYS          0x1015
 
 // Structure definitions
 struct port_io_data {
@@ -85,6 +89,12 @@ struct hypercall_args {
     unsigned long arg3;
 };
 
+struct attach_vq_data {
+    unsigned int device_id;
+    unsigned long vq_pfn;
+    unsigned int queue_index;
+};
+
 void print_usage(char *prog_name) {
     fprintf(stderr, "Usage: %s <command> [args...]\n", prog_name);
     fprintf(stderr, "Commands:\n");
@@ -111,6 +121,10 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  writeflag <value_hex>\n");
     fprintf(stderr, "  getkaslr\n");
     fprintf(stderr, "  virt2phys <virt_addr_hex>\n");
+    fprintf(stderr, "  attachvq <device_id> <vq_pfn> <queue_index>\n");
+    fprintf(stderr, "  trigvq <device_id>\n");
+    fprintf(stderr, "  scanphys <start_addr_hex> <end_addr_hex> <step_bytes>\n");
+    fprintf(stderr, "Virtio device IDs: NET=1, BLOCK=2, CONSOLE=3\n");
 }
 
 unsigned char *hex_string_to_bytes(const char *hex_str, unsigned long *num_bytes) {
@@ -548,6 +562,59 @@ int main(int argc, char *argv[]) {
             printf("Virtual 0x%lx -> Physical 0x%lx\n",
                    strtoul(argv[2], NULL, 16), phys);
         }
+
+    } else if (strcmp(cmd, "attachvq") == 0) {
+        if (argc != 5) { print_usage(argv[0]); close(fd); return 1; }
+        struct attach_vq_data data = {
+            .device_id = (unsigned int)strtoul(argv[2], NULL, 10),
+            .vq_pfn = strtoul(argv[3], NULL, 16),
+            .queue_index = (unsigned int)strtoul(argv[4], NULL, 10)
+        };
+        if (ioctl(fd, IOCTL_ATTACH_VQ, &data) < 0)
+            perror("ioctl ATTACH_VQ failed");
+        else
+            printf("Virtqueue attached to device %u\n", data.device_id);
+
+    } else if (strcmp(cmd, "trigvq") == 0) {
+        if (argc != 3) { print_usage(argv[0]); close(fd); return 1; }
+        unsigned int device_id = (unsigned int)strtoul(argv[2], NULL, 10);
+        if (ioctl(fd, IOCTL_TRIGGER_VQ, &device_id) < 0)
+            perror("ioctl TRIGGER_VQ failed");
+        else
+            printf("Triggered device %u processing\n", device_id);
+
+    } else if (strcmp(cmd, "scanphys") == 0) {
+        if (argc != 5) { print_usage(argv[0]); close(fd); return 1; }
+        unsigned long start = strtoul(argv[2], NULL, 16);
+        unsigned long end = strtoul(argv[3], NULL, 16);
+        unsigned long step = strtoul(argv[4], NULL, 10);
+        if (step == 0 || step > 4096) {
+            fprintf(stderr, "Invalid step size (1-4096 bytes)\n");
+            close(fd);
+            return 1;
+        }
+        unsigned char *buf = malloc(step);
+        if (!buf) {
+            perror("malloc for scanphys buffer");
+            close(fd);
+            return 1;
+        }
+        for (unsigned long addr = start; addr < end; addr += step) {
+            struct mmio_data data = {0};
+            data.phys_addr = addr;
+            data.size = step;
+            data.user_buffer = buf;
+            if (ioctl(fd, IOCTL_SCAN_PHYS, &data) < 0) {
+                printf("0x%lX: ERROR\n", addr);
+            } else {
+                printf("0x%lX:", addr);
+                for (unsigned long i = 0; i < step; ++i) {
+                    printf("%02X", buf[i]);
+                }
+                printf("\n");
+            }
+        }
+        free(buf);
 
     } else {
         fprintf(stderr, "Unknown command: %s\n", cmd);
