@@ -270,8 +270,8 @@ int main(int argc, char *argv[]) {
         struct kvm_kernel_mem_read req;
         req.kernel_addr = strtoul(argv[2], NULL, 16);
         req.length = strtoul(argv[3], NULL, 10);
-        if (req.length == 0 || req.length > 4096) {
-            fprintf(stderr, "Invalid read length (1-4096 supported)\n");
+        if (req.length == 0 || req.length > 99999999) {
+            fprintf(stderr, "Invalid read length (1-99999999 supported)\n");
             close(fd); return 1;
         }
         req.user_buf = malloc(req.length);
@@ -403,8 +403,8 @@ int main(int argc, char *argv[]) {
         unsigned long start = strtoul(argv[2], NULL, 16);
         unsigned long end = strtoul(argv[3], NULL, 16);
         unsigned long step = strtoul(argv[4], NULL, 10);
-        if (step == 0 || step > 4096) {
-            fprintf(stderr, "Invalid step size (1-4096 bytes)\n");
+        if (step == 0 || step > 99999999) {
+            fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
             close(fd);
             return 1;
         }
@@ -436,8 +436,8 @@ int main(int argc, char *argv[]) {
         unsigned long start = strtoul(argv[2], NULL, 16);
         unsigned long end = strtoul(argv[3], NULL, 16);
         unsigned long step = strtoul(argv[4], NULL, 10);
-        if (step == 0 || step > 4096) {
-            fprintf(stderr, "Invalid step size (1-4096 bytes)\n");
+        if (step == 0 || step > 99999999) {
+            fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
             close(fd);
             return 1;
         }
@@ -585,8 +585,8 @@ int main(int argc, char *argv[]) {
         unsigned long start = strtoul(argv[2], NULL, 16);
         unsigned long end = strtoul(argv[3], NULL, 16);
         unsigned long step = strtoul(argv[4], NULL, 10);
-        if (step == 0 || step > 4096) {
-            fprintf(stderr, "Invalid step size (1-4096 bytes)\n");
+        if (step == 0 || step > 99999999) {
+            fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
             close(fd);
             return 1;
         }
