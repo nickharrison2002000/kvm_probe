@@ -27,7 +27,7 @@ KERN_VER=$(uname -r)
 
 ### ===Install basic build tools===
 apt update -y >/dev/null
-apt install sudo git nm make xxd gcc python3-venv python3-pip gdb build-essential binutils tar -y >/dev/null || true
+apt install sudo git make xxd gcc python3-venv python3-pip gdb build-essential binutils tar -y >/dev/null || true
 apt install -f -y >/dev/null
 
 sleep 2
