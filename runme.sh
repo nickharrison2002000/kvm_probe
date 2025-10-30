@@ -69,7 +69,7 @@ sleep 2
 echo "[*] getting kvm_prober setup..."
 make
 make install
-cp kvm_prober /bin/bash
+cp kvm_prober /bin
 
 sleep 2
 echo "[*] allocating memory for kvm_prober..."
