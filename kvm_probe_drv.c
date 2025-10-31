@@ -131,6 +131,20 @@ struct attach_vq_data {
     unsigned int queue_index;
 };
 
+// NEW: Host memory access structures
+struct host_mem_access {
+    unsigned long host_addr;     // Host virtual address
+    unsigned long length;
+    unsigned char __user *user_buffer;
+};
+
+// NEW: Host physical memory access
+struct host_phys_access {
+    unsigned long host_phys_addr; // Host physical address
+    unsigned long length;
+    unsigned char __user *user_buffer;
+};
+
 #define IOCTL_READ_PORT          0x1001
 #define IOCTL_WRITE_PORT         0x1002
 #define IOCTL_READ_MMIO          0x1003
@@ -152,6 +166,11 @@ struct attach_vq_data {
 #define IOCTL_ATTACH_VQ          0x1013
 #define IOCTL_TRIGGER_VQ         0x1014
 #define IOCTL_SCAN_PHYS          0x1015
+// NEW: Host memory access IOCTLs
+#define IOCTL_READ_HOST_MEM      0x1016
+#define IOCTL_WRITE_HOST_MEM     0x1017
+#define IOCTL_READ_HOST_PHYS     0x1018
+#define IOCTL_WRITE_HOST_PHYS    0x1019
 
 static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg);
 
@@ -421,6 +440,119 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             }
             memcpy((void *)req.kernel_addr, tmp, req.length);
             kfree(tmp);
+            force_hypercall();
+            break;
+        }
+
+        // NEW: Host virtual memory access
+        case IOCTL_READ_HOST_MEM: {
+            struct host_mem_access req;
+            if (copy_from_user(&req, (struct host_mem_access __user *)arg, sizeof(req)))
+                return -EFAULT;
+            if (!req.length || !req.user_buffer)
+                return -EINVAL;
+            
+            // Direct access to host kernel memory
+            if (copy_to_user(req.user_buffer, (void *)req.host_addr, req.length))
+                return -EFAULT;
+            
+            printk(KERN_INFO "%s: READ_HOST_MEM: host_addr=0x%lx, length=%lu\n", 
+                   DRIVER_NAME, req.host_addr, req.length);
+            force_hypercall();
+            break;
+        }
+
+        case IOCTL_WRITE_HOST_MEM: {
+            struct host_mem_access req;
+            if (copy_from_user(&req, (struct host_mem_access __user *)arg, sizeof(req)))
+                return -EFAULT;
+            if (!req.length || !req.user_buffer)
+                return -EINVAL;
+            
+            void *tmp = kmalloc(req.length, GFP_KERNEL);
+            if (!tmp)
+                return -ENOMEM;
+            if (copy_from_user(tmp, req.user_buffer, req.length)) {
+                kfree(tmp);
+                return -EFAULT;
+            }
+            
+            // Direct write to host kernel memory
+            memcpy((void *)req.host_addr, tmp, req.length);
+            kfree(tmp);
+            
+            printk(KERN_INFO "%s: WRITE_HOST_MEM: host_addr=0x%lx, length=%lu\n", 
+                   DRIVER_NAME, req.host_addr, req.length);
+            force_hypercall();
+            break;
+        }
+
+        // NEW: Host physical memory access
+        case IOCTL_READ_HOST_PHYS: {
+            struct host_phys_access req;
+            if (copy_from_user(&req, (struct host_phys_access __user *)arg, sizeof(req)))
+                return -EFAULT;
+            if (!req.length || !req.user_buffer)
+                return -EINVAL;
+            
+            // Map host physical memory and read
+            void __iomem *mapped = ioremap(req.host_phys_addr, req.length);
+            if (!mapped)
+                return -ENOMEM;
+            
+            void *kbuf = kmalloc(req.length, GFP_KERNEL);
+            if (!kbuf) {
+                iounmap(mapped);
+                return -ENOMEM;
+            }
+            
+            memcpy_fromio(kbuf, mapped, req.length);
+            if (copy_to_user(req.user_buffer, kbuf, req.length)) {
+                kfree(kbuf);
+                iounmap(mapped);
+                return -EFAULT;
+            }
+            
+            kfree(kbuf);
+            iounmap(mapped);
+            
+            printk(KERN_INFO "%s: READ_HOST_PHYS: host_phys=0x%lx, length=%lu\n", 
+                   DRIVER_NAME, req.host_phys_addr, req.length);
+            force_hypercall();
+            break;
+        }
+
+        case IOCTL_WRITE_HOST_PHYS: {
+            struct host_phys_access req;
+            if (copy_from_user(&req, (struct host_phys_access __user *)arg, sizeof(req)))
+                return -EFAULT;
+            if (!req.length || !req.user_buffer)
+                return -EINVAL;
+            
+            // Map host physical memory and write
+            void __iomem *mapped = ioremap(req.host_phys_addr, req.length);
+            if (!mapped)
+                return -ENOMEM;
+            
+            void *kbuf = kmalloc(req.length, GFP_KERNEL);
+            if (!kbuf) {
+                iounmap(mapped);
+                return -ENOMEM;
+            }
+            
+            if (copy_from_user(kbuf, req.user_buffer, req.length)) {
+                kfree(kbuf);
+                iounmap(mapped);
+                return -EFAULT;
+            }
+            
+            memcpy_toio(mapped, kbuf, req.length);
+            
+            kfree(kbuf);
+            iounmap(mapped);
+            
+            printk(KERN_INFO "%s: WRITE_HOST_PHYS: host_phys=0x%lx, length=%lu\n", 
+                   DRIVER_NAME, req.host_phys_addr, req.length);
             force_hypercall();
             break;
         }
