@@ -34,6 +34,11 @@
 #define IOCTL_ATTACH_VQ          0x1013
 #define IOCTL_TRIGGER_VQ         0x1014
 #define IOCTL_SCAN_PHYS          0x1015
+// NEW: Host memory access IOCTLs
+#define IOCTL_READ_HOST_MEM      0x1016
+#define IOCTL_WRITE_HOST_MEM     0x1017
+#define IOCTL_READ_HOST_PHYS     0x1018
+#define IOCTL_WRITE_HOST_PHYS    0x1019
 
 struct port_io_data {
     unsigned short port;
@@ -95,6 +100,20 @@ struct attach_vq_data {
     unsigned int queue_index;
 };
 
+// NEW: Host memory access structures
+struct host_mem_access {
+    unsigned long host_addr;     // Host virtual address
+    unsigned long length;
+    unsigned char *user_buffer;
+};
+
+// NEW: Host physical memory access
+struct host_phys_access {
+    unsigned long host_phys_addr; // Host physical address
+    unsigned long length;
+    unsigned char *user_buffer;
+};
+
 void print_usage(char *prog_name) {
     fprintf(stderr, "  Usage: %s <command> [args...]\n", prog_name);
     fprintf(stderr, "  Commands:\n");
@@ -106,6 +125,10 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  writemmio_buf <phys_addr_hex> <hex_string_to_write>\n");
     fprintf(stderr, "  readkvmem <kaddr_hex> <num_bytes>\n");
     fprintf(stderr, "  writekvmem <kaddr_hex> <hex_string_to_write>\n");
+    fprintf(stderr, "  readhostmem <host_vaddr_hex> <num_bytes>\n");
+    fprintf(stderr, "  writehostmem <host_vaddr_hex> <hex_string_to_write>\n");
+    fprintf(stderr, "  readhostphys <host_paddr_hex> <num_bytes>\n");
+    fprintf(stderr, "  writehostphys <host_paddr_hex> <hex_string_to_write>\n");
     fprintf(stderr, "  allocvqpage\n");
     fprintf(stderr, "  freevqpage\n");
     fprintf(stderr, "  writevqdesc <idx> <buf_gpa_hex> <buf_len> <flags_hex> <next_idx>\n");
@@ -124,6 +147,8 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  attachvq <device_id> <vq_pfn> <queue_index>\n");
     fprintf(stderr, "  trigvq <device_id>\n");
     fprintf(stderr, "  scanphys <start_addr_hex> <end_addr_hex> <step_bytes>\n");
+    fprintf(stderr, "  scanhostmem <start_host_vaddr_hex> <end_host_vaddr_hex> <step_bytes>\n");
+    fprintf(stderr, "  scanhostphys <start_host_paddr_hex> <end_host_paddr_hex> <step_bytes>\n");
     fprintf(stderr, "  Virtio device IDs: NET=1, BLOCK=2, CONSOLE=3\n");
 }
 
@@ -313,6 +338,102 @@ int main(int argc, char *argv[]) {
             printf("Wrote %lu bytes to kernel memory 0x%lX.\n", req.length, req.kernel_addr);
         free(req.user_buf);
 
+    } else if (strcmp(cmd, "readhostmem") == 0) {
+        if (argc != 4) { print_usage(argv[0]); close(fd); return 1; }
+        struct host_mem_access req;
+        req.host_addr = strtoul(argv[2], NULL, 16);
+        req.length = strtoul(argv[3], NULL, 10);
+        if (req.length == 0 || req.length > 99999999) {
+            fprintf(stderr, "Invalid read length (1-99999999 supported)\n");
+            close(fd); return 1;
+        }
+        req.user_buffer = malloc(req.length);
+        if (!req.user_buffer) {
+            perror("malloc for host mem read");
+            close(fd); return 1;
+        }
+        if (ioctl(fd, IOCTL_READ_HOST_MEM, &req) < 0) {
+            perror("ioctl IOCTL_READ_HOST_MEM failed");
+        } else {
+            printf("Host memory @ 0x%lx:\n", req.host_addr);
+            for (unsigned long i = 0; i < req.length; ++i) {
+                printf("%02X", req.user_buffer[i]);
+                if ((i + 1) % 16 == 0) printf(" ");
+                if ((i + 1) % 64 == 0) printf("\n");
+            }
+            printf("\n[ASCII]:\n");
+            for (unsigned long i = 0; i < req.length; ++i)
+                printf("%c", (req.user_buffer[i] >= 0x20 && req.user_buffer[i] < 0x7F) ? req.user_buffer[i] : '.');
+            printf("\n");
+        }
+        free(req.user_buffer);
+
+    } else if (strcmp(cmd, "writehostmem") == 0) {
+        if (argc != 4) { print_usage(argv[0]); close(fd); return 1; }
+        struct host_mem_access req;
+        req.host_addr = strtoul(argv[2], NULL, 16);
+        unsigned long num_bytes = 0;
+        req.user_buffer = hex_string_to_bytes(argv[3], &num_bytes);
+        req.length = num_bytes;
+        if (!req.user_buffer || req.length == 0) {
+            fprintf(stderr, "Failed to parse hex string.\n");
+            if (req.user_buffer) free(req.user_buffer);
+            close(fd); return 1;
+        }
+        if (ioctl(fd, IOCTL_WRITE_HOST_MEM, &req) < 0)
+            perror("ioctl IOCTL_WRITE_HOST_MEM failed");
+        else
+            printf("Wrote %lu bytes to host memory 0x%lx.\n", req.length, req.host_addr);
+        free(req.user_buffer);
+
+    } else if (strcmp(cmd, "readhostphys") == 0) {
+        if (argc != 4) { print_usage(argv[0]); close(fd); return 1; }
+        struct host_phys_access req;
+        req.host_phys_addr = strtoul(argv[2], NULL, 16);
+        req.length = strtoul(argv[3], NULL, 10);
+        if (req.length == 0 || req.length > 99999999) {
+            fprintf(stderr, "Invalid read length (1-99999999 supported)\n");
+            close(fd); return 1;
+        }
+        req.user_buffer = malloc(req.length);
+        if (!req.user_buffer) {
+            perror("malloc for host phys read");
+            close(fd); return 1;
+        }
+        if (ioctl(fd, IOCTL_READ_HOST_PHYS, &req) < 0) {
+            perror("ioctl IOCTL_READ_HOST_PHYS failed");
+        } else {
+            printf("Host physical memory @ 0x%lx:\n", req.host_phys_addr);
+            for (unsigned long i = 0; i < req.length; ++i) {
+                printf("%02X", req.user_buffer[i]);
+                if ((i + 1) % 16 == 0) printf(" ");
+                if ((i + 1) % 64 == 0) printf("\n");
+            }
+            printf("\n[ASCII]:\n");
+            for (unsigned long i = 0; i < req.length; ++i)
+                printf("%c", (req.user_buffer[i] >= 0x20 && req.user_buffer[i] < 0x7F) ? req.user_buffer[i] : '.');
+            printf("\n");
+        }
+        free(req.user_buffer);
+
+    } else if (strcmp(cmd, "writehostphys") == 0) {
+        if (argc != 4) { print_usage(argv[0]); close(fd); return 1; }
+        struct host_phys_access req;
+        req.host_phys_addr = strtoul(argv[2], NULL, 16);
+        unsigned long num_bytes = 0;
+        req.user_buffer = hex_string_to_bytes(argv[3], &num_bytes);
+        req.length = num_bytes;
+        if (!req.user_buffer || req.length == 0) {
+            fprintf(stderr, "Failed to parse hex string.\n");
+            if (req.user_buffer) free(req.user_buffer);
+            close(fd); return 1;
+        }
+        if (ioctl(fd, IOCTL_WRITE_HOST_PHYS, &req) < 0)
+            perror("ioctl IOCTL_WRITE_HOST_PHYS failed");
+        else
+            printf("Wrote %lu bytes to host physical memory 0x%lx.\n", req.length, req.host_phys_addr);
+        free(req.user_buffer);
+
     } else if (strcmp(cmd, "allocvqpage") == 0) {
         if (argc != 2) { print_usage(argv[0]); close(fd); return 1; }
         unsigned long pfn_returned = 0;
@@ -453,6 +574,72 @@ int main(int argc, char *argv[]) {
             data.size = step;
             data.user_buffer = buf;
             if (ioctl(fd, IOCTL_READ_MMIO, &data) < 0) {
+                printf("0x%lX: ERROR\n", addr);
+            } else {
+                printf("0x%lX:", addr);
+                for (unsigned long i = 0; i < step; ++i) {
+                    printf("%02X", buf[i]);
+                }
+                printf("\n");
+            }
+        }
+        free(buf);
+
+    } else if (strcmp(cmd, "scanhostmem") == 0) {
+        if (argc != 5) { print_usage(argv[0]); close(fd); return 1; }
+        unsigned long start = strtoul(argv[2], NULL, 16);
+        unsigned long end = strtoul(argv[3], NULL, 16);
+        unsigned long step = strtoul(argv[4], NULL, 10);
+        if (step == 0 || step > 99999999) {
+            fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
+            close(fd);
+            return 1;
+        }
+        unsigned char *buf = malloc(step);
+        if (!buf) {
+            perror("malloc for scanhostmem buffer");
+            close(fd);
+            return 1;
+        }
+        for (unsigned long addr = start; addr < end; addr += step) {
+            struct host_mem_access req = {0};
+            req.host_addr = addr;
+            req.length = step;
+            req.user_buffer = buf;
+            if (ioctl(fd, IOCTL_READ_HOST_MEM, &req) < 0) {
+                printf("0x%lX: ERROR\n", addr);
+            } else {
+                printf("0x%lX:", addr);
+                for (unsigned long i = 0; i < step; ++i) {
+                    printf("%02X", buf[i]);
+                }
+                printf("\n");
+            }
+        }
+        free(buf);
+
+    } else if (strcmp(cmd, "scanhostphys") == 0) {
+        if (argc != 5) { print_usage(argv[0]); close(fd); return 1; }
+        unsigned long start = strtoul(argv[2], NULL, 16);
+        unsigned long end = strtoul(argv[3], NULL, 16);
+        unsigned long step = strtoul(argv[4], NULL, 10);
+        if (step == 0 || step > 99999999) {
+            fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
+            close(fd);
+            return 1;
+        }
+        unsigned char *buf = malloc(step);
+        if (!buf) {
+            perror("malloc for scanhostphys buffer");
+            close(fd);
+            return 1;
+        }
+        for (unsigned long addr = start; addr < end; addr += step) {
+            struct host_phys_access req = {0};
+            req.host_phys_addr = addr;
+            req.length = step;
+            req.user_buffer = buf;
+            if (ioctl(fd, IOCTL_READ_HOST_PHYS, &req) < 0) {
                 printf("0x%lX: ERROR\n", addr);
             } else {
                 printf("0x%lX:", addr);
