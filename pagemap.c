@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 /* unnecessary and boring */
 #define __PROG__        "getPAGEMAP"
@@ -31,6 +32,9 @@
 
 /* Kernel address space starts here on x86-64 */
 #define KERNEL_ADDR_START      0xFFFF800000000000ULL
+
+/* QEMU RAM region minimum size */
+#define QEMU_RAM_REGION_MIN_SIZE (256 * 1024 * 1024ULL) /* 256MB minimum for QEMU RAM */
 
 /* kpageflags bit definitions */
 #define KPF_LOCKED              0
@@ -60,20 +64,28 @@
 #define KPF_ZERO_PAGE           24
 #define KPF_IDLE                25
 
+static void print_ascii(const unsigned char* buf, size_t len) {
+    for (size_t i = 0; i < len; i++)
+        printf("%c", (buf[i] >= 32 && buf[i] <= 126) ? buf[i] : '.');
+}
 
-/*
- * help
+/* help
  *
  * display useful information
  */
 static void
 help(void)
 {
-        /* usage info */
         (void)fprintf(stdout, "Usage: %s [OPTION]...\n", __EXEC__);
         (void)fprintf(stdout, "Read /proc/<pid>/pagemap and /proc/kpageflags.\n\n");
-
-        /* options */
+        (void)fprintf(stdout, "\t--scan-flag HEXVAL\tScan all guest physical memory for value\n");
+        (void)fprintf(stdout, "\t--scan-mmio START END STEP --scan-flag HEXVAL\tScan MMIO region for value\n");
+        (void)fprintf(stdout, "\t--scan-pattern FILE\tScan using patterns from file\n");
+        (void)fprintf(stdout, "\t--output-script\tScripting output for automation\n");
+        (void)fprintf(stdout, "\t--auto-qemu\t\tAutomatically detect QEMU PID\n");
+        (void)fprintf(stdout, "\t--batch-gpa FILE\tBatch translate GPAs from file\n");
+        (void)fprintf(stdout, "\t--export-maps FORMAT\tExport memory maps (python, json, shell)\n");
+        (void)fprintf(stdout, "\t--find-symbol ADDR\tFind which mapping contains address\n");
         (void)fprintf(stdout,
         "\t-p, --pid=NUM\t\tread the pagemap of process with PID=NUM\n");
         (void)fprintf(stdout,
@@ -91,84 +103,25 @@ help(void)
         (void)fprintf(stdout, "\t-h, --help\t\tdisplay this help and exit\n");
         (void)fprintf(stdout,
                "\t-v, --version\t\tprint version information and exit\n\n");
-
-        /* notes */
-        (void)fprintf(stdout, "NOTE: Use -p and -a together for userspace addresses\n");
-        (void)fprintf(stdout, "      Use -f alone to directly query a PFN in kpageflags\n");
-        (void)fprintf(stdout, "      Requires root privileges for kpageflags access\n");
-        (void)fprintf(stdout, "      For guest kernel addresses (>= 0xFFFF800000000000), uses /proc/kmod for symbol resolution\n");
-        (void)fprintf(stdout, "      For host kernel addresses (when doing GPA/HPA translation), uses vmlinux in current directory\n");
-        (void)fprintf(stdout, "      This tool runs entirely from inside the guest VM\n");
-        (void)fprintf(stdout, "      Use -q and -g together to translate GPA to HPA (requires host vmlinux for host symbol resolution)\n");
-        (void)fprintf(stdout, "      Use -q and -H together to translate HPA to GPA (requires host vmlinux for host symbol resolution)\n\n");
-
-        /* examples using the specific addresses of interest */
-        (void)fprintf(stdout, "Examples for KVMCTF addresses 0xffffffff826279a and 0xffffffff82b5ee10:\n\n");
-
-        (void)fprintf(stdout, "1. Query guest kernel addresses directly (inside guest):\n");
-        (void)fprintf(stdout, "  %s -p 1 -a 0xffffffff826279a -k\t# Query first kernel address with symbol resolution\n", __EXEC__);
-        (void)fprintf(stdout, "  %s -p 1 -a 0xffffffff82b5ee10 -k\t# Query second kernel address with symbol resolution\n\n", __EXEC__);
-
-        (void)fprintf(stdout, "2. Get Guest Physical Address (GPA) for kernel addresses:\n");
-        (void)fprintf(stdout, "  %s -p 1 -a 0xffffffff826279a\t\t# Get GPA for first address\n", __EXEC__);
-        (void)fprintf(stdout, "  %s -p 1 -a 0xffffffff82b5ee10\t\t# Get GPA for second address\n\n", __EXEC__);
-
-        (void)fprintf(stdout, "3. Translate GPA to Host Physical Address (HPA) using QEMU PID:\n");
-        (void)fprintf(stdout, "  %s -q 1234 -g 0x6427000 -k\t\t# Translate GPA to HPA (replace 0x6427000 with actual GPA)\n", __EXEC__);
-        (void)fprintf(stdout, "  %s -q 1234 -g 0x6427000\t\t# Translate without kpageflags\n\n", __EXEC__);
-
-        (void)fprintf(stdout, "4. Translate HPA to GPA using QEMU PID:\n");
-        (void)fprintf(stdout, "  %s -q 1234 -H 0xabcdef000 -k\t\t# Translate HPA to GPA (replace 0xabcdef000 with actual HPA)\n", __EXEC__);
-        (void)fprintf(stdout, "  %s -q 1234 -H 0xabcdef000\t\t# Translate without kpageflags\n\n", __EXEC__);
-
-        (void)fprintf(stdout, "5. Direct PFN queries (if you know the PFNs):\n");
-        (void)fprintf(stdout, "  %s -f 0x12345 -k\t\t\t# Query guest PFN with kpageflags\n", __EXEC__);
-        (void)fprintf(stdout, "  %s -f 0x67890\t\t\t\t# Query guest PFN without kpageflags\n\n", __EXEC__);
-
-        (void)fprintf(stdout, "6. Complete workflow example:\n");
-        (void)fprintf(stdout, "   # Step 1: Get GPA of kernel address in guest\n");
-        (void)fprintf(stdout, "   %s -p 1 -a 0xffffffff826279a\n", __EXEC__);
-        (void)fprintf(stdout, "   # Step 2: Use the GPA to find HPA via QEMU\n");
-        (void)fprintf(stdout, "   %s -q 1234 -g <GPA_from_step1> -k\n\n", __EXEC__);
-
-        (void)fprintf(stdout, "Note: Replace '1234' with actual QEMU PID and addresses with actual values\n");
-
-        /* bugs */
         (void)fprintf(stdout, "Report bugs to %s\n", __BUGS__);
 }
 
-/*
- * version
- *
- * display version information
- */
 static void
 version(void)
 {
-        /* display version */
         (void)fprintf(stdout, "%s %s\n\n", __PROG__, __VER__);
-        /* copyright info */
         (void)fprintf(stdout, "%s\n", __COPYLEFT__);
 }
 
-/*
- * is_kvm_guest
- *
- * Detect if running inside a KVM guest using CPUID
- *
- * return: 1 if KVM guest, 0 otherwise
- */
 static int
 is_kvm_guest(void)
 {
 #if defined(__x86_64__) || defined(__i386__)
         unsigned int eax, ebx, ecx, edx;
-
         eax = 0x40000000;
         __asm__ __volatile__ ("cpuid"
                               : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                               : "a"(eax));
-
         if (ebx == 0x4B4D564B && ecx == 0x564B4D56 && edx == 0x0000004D) {
                 return 1;
         }
@@ -176,15 +129,170 @@ is_kvm_guest(void)
         return 0;
 }
 
+/* Enhanced QEMU process detection */
+static pid_t
+find_qemu_processes(void)
+{
+    DIR *dir;
+    struct dirent *entry;
+    pid_t candidates[10] = {0};
+    int count = 0;
+    
+    dir = opendir("/proc");
+    if (!dir) return -1;
+    
+    while ((entry = readdir(dir)) != NULL && count < 10) {
+        pid_t pid = atoi(entry->d_name);
+        if (pid > 0) {
+            char path[PATH_SZ], line[1024];
+            FILE *fp;
+            
+            snprintf(path, PATH_SZ, "/proc/%d/cmdline", pid);
+            fp = fopen(path, "r");
+            if (fp) {
+                if (fgets(line, sizeof(line), fp)) {
+                    if (strstr(line, "qemu-system") || strstr(line, "qemu-kvm") || 
+                        strstr(line, "kvm")) {
+                        candidates[count++] = pid;
+                        printf("Found QEMU process: PID %d - %s\n", pid, line);
+                    }
+                }
+                fclose(fp);
+            }
+        }
+    }
+    closedir(dir);
+    
+    if (count == 1) return candidates[0];
+    if (count > 1) {
+        printf("Multiple QEMU processes found. Using PID %d\n", candidates[0]);
+        return candidates[0];
+    }
+    return -1;
+}
+
+/* Enhanced: Scan for flag in file (guest RAM or MMIO) */
+int scan_file_for_flag(const char *path, size_t blocksize, const unsigned char *flag, size_t flaglen, int output_script) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror("Failed to open file for scan");
+        return 1;
+    }
+    unsigned char *buf = malloc(blocksize);
+    if (!buf) {
+        perror("malloc for scan");
+        close(fd);
+        return 1;
+    }
+    off_t offset = 0;
+    ssize_t r;
+    int found = 0;
+    while ((r = read(fd, buf, blocksize)) > 0) {
+        for (ssize_t i = 0; i < r - (ssize_t)flaglen + 1; i++) {
+            if (memcmp(buf + i, flag, flaglen) == 0) {
+                found = 1;
+                if (output_script)
+                    printf("echo \"Flag value found at offset 0x%lx\";\n", offset + i);
+                else {
+                    printf("[MATCH] Offset 0x%lx: ", offset + i);
+                    for (size_t f = 0; f < flaglen; f++)
+                        printf("%02x", buf[i+f]);
+                    printf(" [");
+                    print_ascii(buf + i, flaglen);
+                    printf("]\n");
+                }
+            }
+        }
+        offset += r;
+    }
+    free(buf);
+    close(fd);
+    if (!found)
+        printf("[*] Flag value not found in %s\n", path);
+    return found ? 0 : 1;
+}
+
+int scan_guest_ram_for_flag(const unsigned char* flag, size_t flaglen, int output_script) {
+    printf("[*] Scanning /dev/mem for flag value\n");
+    return scan_file_for_flag("/dev/mem", 0x10000, flag, flaglen, output_script);
+}
+
+int scan_mmio_for_flag(uint64_t start, uint64_t end, uint64_t step, const unsigned char* flag, size_t flaglen, int output_script) {
+    printf("[*] Scanning MMIO region 0x%lx - 0x%lx for flag value\n", start, end);
+    int fd = open("/dev/mem", O_RDONLY);
+    if (fd < 0) {
+        perror("Failed to open /dev/mem for MMIO scan");
+        return 1;
+    }
+    unsigned char *buf = malloc(step);
+    if (!buf) {
+        perror("malloc for MMIO scan");
+        close(fd);
+        return 1;
+    }
+    int found = 0;
+    for (uint64_t addr = start; addr < end; addr += step) {
+        if (lseek(fd, addr, SEEK_SET) == (off_t)-1) {
+            continue;
+        }
+        ssize_t r = read(fd, buf, step);
+        if (r < (ssize_t)flaglen) continue;
+        for (ssize_t i = 0; i < r - (ssize_t)flaglen + 1; i++) {
+            if (memcmp(buf + i, flag, flaglen) == 0) {
+                found = 1;
+                if (output_script)
+                    printf("echo \"Flag value found in MMIO at 0x%lx offset %lx\";\n", addr, addr + i);
+                else {
+                    printf("[MATCH] MMIO Addr 0x%lx: ", addr + i);
+                    for (size_t f = 0; f < flaglen; f++)
+                        printf("%02x", buf[i+f]);
+                    printf(" [");
+                    print_ascii(buf + i, flaglen);
+                    printf("]\n");
+                }
+            }
+        }
+    }
+    free(buf);
+    close(fd);
+    if (!found)
+        printf("[*] Flag value not found in MMIO region\n");
+    return found ? 0 : 1;
+}
+
+/* Pattern-based scanning */
+int scan_for_patterns(const char *path, const char *pattern_file, int output_script) {
+    FILE *pf = fopen(pattern_file, "r");
+    if (!pf) {
+        perror("Failed to open pattern file");
+        return 1;
+    }
+    
+    char pattern_name[256];
+    unsigned char pattern[256];
+    size_t pattern_len;
+    int found_any = 0;
+    
+    while (fscanf(pf, "%255[^:]:", pattern_name) == 1) {
+        char hex_pattern[512];
+        if (fscanf(pf, "%511[^\n]\n", hex_pattern) == 1) {
+            pattern_len = strlen(hex_pattern) / 2;
+            for (size_t i = 0; i < pattern_len; i++) {
+                sscanf(hex_pattern + 2*i, "%2hhx", &pattern[i]);
+            }
+            
+            printf("[*] Scanning for pattern: %s\n", pattern_name);
+            if (scan_file_for_flag(path, 0x10000, pattern, pattern_len, output_script) == 0) {
+                found_any = 1;
+            }
+        }
+    }
+    fclose(pf);
+    return found_any ? 0 : 1;
+}
+
 /*
- * find_qemu_ram_region
- *
- * Find the base virtual address and size of the largest anonymous mapping in /proc/<pid>/maps,
- * which is typically the guest RAM in QEMU.
- *
- * @pid: QEMU PID
- * @size_out: output for size
- * return: base address or 0 on failure
+ * find_qemu_ram_region: Find the base virtual address and size of the largest anonymous mapping in /proc/<pid>/maps
  */
 static uint64_t
 find_qemu_ram_region(pid_t pid, uint64_t *size_out)
@@ -213,18 +321,13 @@ find_qemu_ram_region(pid_t pid, uint64_t *size_out)
         long inode;
         char pathname[1024] = {0};
 
-        // Parse the maps line
         if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %4s %lx %9s %ld %1023[^\n]",
-                  (uint64_t*)&start, (uint64_t*)&end, perms, &offset, dev, &inode, pathname) >= 6) {
-
-            // Look for large anonymous read-write mappings (typical of guest RAM)
+                  &start, &end, perms, &offset, dev, &inode, pathname) >= 6) {
             if (pathname[0] == '\0' && strstr(perms, "rw") && offset == 0) {
                 uint64_t size = end - start;
                 region_count++;
-
                 (void)fprintf(stdout, "  Region %d: 0x%" PRIx64 "-0x%" PRIx64 " (size: 0x%" PRIx64 ")\n",
                             region_count, start, end, size);
-
                 if (size > max_size) {
                     max_size = size;
                     base = start;
@@ -248,14 +351,7 @@ find_qemu_ram_region(pid_t pid, uint64_t *size_out)
     return base;
 }
 
-/*
- * print_kpageflags
- *
- * decode and print kpageflags bits
- *
- * @flags:     the kpageflags value
- * @is_guest:  whether running in guest
- */
+/* print_kpageflags: decode and print kpageflags bits */
 static void
 print_kpageflags(uint64_t flags, int is_guest)
 {
@@ -293,7 +389,6 @@ print_kpageflags(uint64_t flags, int is_guest)
         if (flags & (1ULL << KPF_ZERO_PAGE))    fprintf(stdout, "  - ZERO_PAGE\n");
         if (flags & (1ULL << KPF_IDLE))         fprintf(stdout, "  - IDLE\n");
 
-        /* Check for evictable */
         if ((flags & (1ULL << KPF_LRU)) && !(flags & (1ULL << KPF_UNEVICTABLE))) {
                 fprintf(stdout, "  - EVICTABLE");
                 if (!is_guest) {
@@ -304,13 +399,7 @@ print_kpageflags(uint64_t flags, int is_guest)
         }
 }
 
-/*
- * query_kpageflags
- *
- * query /proc/kpageflags for a given PFN
- *
- * @pfn:       the page frame number
- */
+/* query_kpageflags: query /proc/kpageflags for a given PFN */
 static void
 query_kpageflags(uint64_t pfn, long psize, int is_guest)
 {
@@ -326,22 +415,17 @@ query_kpageflags(uint64_t pfn, long psize, int is_guest)
         (void)fprintf(stdout, "%s Physical Address: %" PRIu64 " (0x%" PRIx64 ")\n",
                      is_guest ? "Guest" : "Host", pa, pa);
 
-        /* open kpageflags */
         if ((fd = open(path, O_RDONLY)) == -1)
                errx(7, "failed while trying to open %s -- %s (need root?)",
                     path, strerror(errno));
-
-        /* calculate offset */
         offset = pfn * sizeof(uint64_t);
 
-        /* seek to the PFN entry */
         if (lseek(fd, offset, SEEK_SET) == -1) {
                (void)close(fd);
                errx(7, "failed while trying to seek in kpageflags -- %s",
                         strerror(errno));
         }
 
-        /* read the flags */
         bytes_read = read(fd, &flags, sizeof(uint64_t));
         if (bytes_read != sizeof(uint64_t)) {
                if (bytes_read == -1) {
@@ -360,23 +444,11 @@ query_kpageflags(uint64_t pfn, long psize, int is_guest)
                }
         }
 
-        /* print the flags */
         print_kpageflags(flags, is_guest);
-
-        /* cleanup */
         (void)close(fd);
 }
 
-/*
- * get_guest_symbol
- *
- * Use /proc/kmod to find the nearest symbol <= vaddr and compute offset.
- * Used for guest kernel address resolution.
- *
- * @vaddr:     the virtual address
- * @buf:       buffer to store the symbol info
- * @bufsz:     size of the buffer
- */
+/* get_guest_symbol: Use /proc/kmod to find the nearest symbol <= vaddr and compute offset */
 static void
 get_guest_symbol(uint64_t vaddr, char *buf, size_t bufsz)
 {
@@ -387,7 +459,6 @@ get_guest_symbol(uint64_t vaddr, char *buf, size_t bufsz)
         char name[256];
         char last_name[256] = {0};
 
-        /* In guest: use /proc/kmod */
         fp = fopen("/proc/kmod", "r");
         if (!fp) {
                 snprintf(buf, bufsz, "Failed to open /proc/kmod");
@@ -395,7 +466,6 @@ get_guest_symbol(uint64_t vaddr, char *buf, size_t bufsz)
         }
 
         while (fgets(line, sizeof(line), fp)) {
-                /* Parse /proc/kmod format: address symbol_name */
                 if (sscanf(line, "%" SCNx64 " %255s", &sym_addr, name) == 2) {
                         if (sym_addr <= vaddr && sym_addr > max_sym_addr) {
                                 max_sym_addr = sym_addr;
@@ -404,7 +474,6 @@ get_guest_symbol(uint64_t vaddr, char *buf, size_t bufsz)
                         }
                 }
         }
-
         fclose(fp);
 
         if (last_name[0]) {
@@ -419,16 +488,7 @@ get_guest_symbol(uint64_t vaddr, char *buf, size_t bufsz)
         }
 }
 
-/*
- * get_host_symbol
- *
- * Use nm on host vmlinux to find the nearest symbol <= vaddr and compute offset.
- * Used for host kernel address resolution from inside the guest.
- *
- * @vaddr:     the virtual address
- * @buf:       buffer to store the symbol info
- * @bufsz:     size of the buffer
- */
+/* get_host_symbol: Use nm on host vmlinux to find the nearest symbol <= vaddr and compute offset */
 static void
 get_host_symbol(uint64_t vaddr, char *buf, size_t bufsz)
 {
@@ -440,7 +500,6 @@ get_host_symbol(uint64_t vaddr, char *buf, size_t bufsz)
         char name[256];
         char last_name[256] = {0};
 
-        /* Use host vmlinux for symbol resolution */
         fp = popen("nm -n vmlinux 2>/dev/null", "r");
         if (!fp) {
                 snprintf(buf, bufsz, "Failed to run nm on host vmlinux (make sure vmlinux is in current directory)");
@@ -456,7 +515,6 @@ get_host_symbol(uint64_t vaddr, char *buf, size_t bufsz)
                         }
                 }
         }
-
         pclose(fp);
 
         if (last_name[0]) {
@@ -471,61 +529,68 @@ get_host_symbol(uint64_t vaddr, char *buf, size_t bufsz)
         }
 }
 
-/*
- * query the pagemap
- *
- * open the /proc/<pid>/pagemap of a process and search the page frame
- * information for a specific virtual address
- *
- * @pid:       the pid of the process that we are interested into
- * @vaddr:     the virtual address (page-aligned)
- * @psize:     page size
- * @use_kpageflags: whether to query kpageflags for the PFN
- * @is_guest:  whether running in guest
- * return:     the PFN (or 0 if not present)
- */
+/* Enhanced symbol finding with multiple methods */
+static void
+find_symbol_in_mappings(pid_t pid, uint64_t addr, int is_guest)
+{
+    char path[PATH_SZ];
+    FILE *fp;
+    char line[1024];
+    
+    snprintf(path, PATH_SZ, "/proc/%d/maps", pid);
+    fp = fopen(path, "r");
+    if (!fp) return;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        uint64_t start, end;
+        char perms[5], pathname[1024] = {0};
+        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %4s %*s %*s %*s %1023[^\n]",
+                  &start, &end, perms, pathname) >= 3) {
+            if (addr >= start && addr < end) {
+                printf("Address 0x%016" PRIx64 " is in mapping: 0x%016" PRIx64 "-0x%016" PRIx64 " %s %s\n",
+                       addr, start, end, perms, pathname[0] ? pathname : "[anon]");
+                
+                if (pathname[0] && strstr(pathname, ".so")) {
+                    /* Library mapping - could use nm/readelf here */
+                    printf("This appears to be in shared library: %s\n", pathname);
+                }
+                break;
+            }
+        }
+    }
+    fclose(fp);
+}
+
+/* querypmap: open the /proc/<pid>/pagemap of a process and search the page frame info for a specific virtual address */
 static uint64_t
 querypmap(pid_t pid, uint64_t vaddr, long psize, int use_kpageflags, int is_guest)
 {
-        /* path in /proc */
         char    path[PATH_SZ];
-        /* pagemap entry */
         uint64_t        pentry  = 0;
         uint64_t        pfn     = 0;
-
-        /* file descriptor */
         int     fd      = -1;
-
-        /* offset for seeking and page number */
         uint64_t        page_num;
         off_t           offset;
         ssize_t         bytes_read;
-
-        /* cleanup */
         (void)memset(path, 0, PATH_SZ);
 
-        /* format the path variable */
         if (snprintf(path, PATH_SZ, "/proc/%d/pagemap", pid) >= PATH_SZ)
                errx(4, "failed while trying to open /proc/%d/pagemap -- path too long",
                         pid);
 
-        /* open the pagemap file with O_RDONLY */
         if ((fd = open(path, O_RDONLY)) == -1)
                errx(4, "failed while trying to open %s -- %s", path,
                         strerror(errno));
 
-        /* calculate page number and offset */
         page_num = vaddr / psize;
         offset = page_num * sizeof(uint64_t);
 
-        /* seek to the appropriate place */
         if (lseek(fd, offset, SEEK_SET) == -1) {
                (void)close(fd);
                errx(5, "failed while trying to seek in pagemap (offset: %ld) -- %s",
                         offset, strerror(errno));
         }
 
-        /* read the corresponding pagemap entry */
         bytes_read = read(fd, &pentry, sizeof(uint64_t));
         if (bytes_read != sizeof(uint64_t)) {
                if (bytes_read == -1) {
@@ -547,23 +612,18 @@ querypmap(pid_t pid, uint64_t vaddr, long psize, int use_kpageflags, int is_gues
                        bytes_read, sizeof(uint64_t));
                }
         }
-
-        /* cleanup */
         (void)close(fd);
 
-        /* check for swap */
         if (pentry & SWAP_MASK) {
                warnx("%#" PRIx64 " is swapped out", vaddr);
                return 0;
         }
 
-        /* check the present bit */
         if ((pentry & PRESENT_MASK) == 0) {
                warnx("%#" PRIx64 " is not present in physical memory", vaddr);
                return 0;
         }
 
-        /* extract PFN */
         pfn = pentry & PFN_MASK;
         (void)fprintf(stdout, "Virtual address: %#" PRIx64 "\n", vaddr);
         (void)fprintf(stdout, "Page number: %" PRIu64 "\n", page_num);
@@ -573,7 +633,6 @@ querypmap(pid_t pid, uint64_t vaddr, long psize, int use_kpageflags, int is_gues
         (void)fprintf(stdout, "%s Physical Address: %" PRIu64 " (0x%" PRIx64 ")\n",
                      is_guest ? "Guest" : "Host", pa, pa);
 
-        /* If this is a kernel address, attempt to translate using appropriate symbol table */
         if (vaddr >= KERNEL_ADDR_START) {
                 char buf[1024];
                 if (is_guest) {
@@ -585,7 +644,6 @@ querypmap(pid_t pid, uint64_t vaddr, long psize, int use_kpageflags, int is_gues
                 }
         }
 
-        /* query kpageflags if requested */
         if (use_kpageflags) {
                (void)fprintf(stdout, "\n");
                query_kpageflags(pfn, psize, is_guest);
@@ -594,17 +652,7 @@ querypmap(pid_t pid, uint64_t vaddr, long psize, int use_kpageflags, int is_gues
         return pfn;
 }
 
-/*
- * translate_gpa_to_hpa
- *
- * Translate GPA to HPA using QEMU PID
- *
- * @qemu_pid: QEMU process PID
- * @gpa: Guest Physical Address
- * @psize: page size
- * @use_kpageflags: whether to query kpageflags
- * @is_guest: whether running in guest (should be 1 since we're in guest)
- */
+/* translate_gpa_to_hpa: Translate GPA to HPA using QEMU PID */
 static void
 translate_gpa_to_hpa(pid_t qemu_pid, uint64_t gpa, long psize, int use_kpageflags, int is_guest)
 {
@@ -612,12 +660,8 @@ translate_gpa_to_hpa(pid_t qemu_pid, uint64_t gpa, long psize, int use_kpageflag
         if (hva_base == 0) {
                 errx(3, "Failed to find QEMU RAM base");
         }
-
-        /* Extract the page-aligned GPA and the offset within the page */
         uint64_t gpa_page_aligned = gpa & ~((uint64_t)(psize - 1));
         uint64_t offset_in_page = gpa & ((uint64_t)(psize - 1));
-
-        /* Calculate the HVA by adding the page-aligned GPA to the base and then adding the offset */
         uint64_t hva = hva_base + gpa_page_aligned + offset_in_page;
 
         (void)fprintf(stdout, "GPA: %#" PRIx64 "\n", gpa);
@@ -626,39 +670,15 @@ translate_gpa_to_hpa(pid_t qemu_pid, uint64_t gpa, long psize, int use_kpageflag
         (void)fprintf(stdout, "Assumed HVA base: %#" PRIx64 "\n", hva_base);
         (void)fprintf(stdout, "HVA: %#" PRIx64 "\n", hva);
 
-        /* Now query pagemap for HVA in QEMU PID to get PFN and HPA */
-        /* Note: querypmap will align the address internally, so we pass the full HVA */
-        /* We pass is_guest=0 because we're dealing with host addresses now */
-        uint64_t pfn = querypmap(qemu_pid, hva, psize, 0, 0);  /* Don't use kpageflags here yet */
+        uint64_t pfn = querypmap(qemu_pid, hva, psize, 0, 0);
 
         if (use_kpageflags && pfn != 0) {
                 (void)fprintf(stdout, "\n");
-                query_kpageflags(pfn, psize, 0);  /* is_guest=0 because this is host physical memory */
+                query_kpageflags(pfn, psize, 0);
         }
 }
 
-/*
- * translate_hpa_to_gpa
- *
- * Translate HPA to GPA using QEMU PID by scanning pagemap
- *
- * @qemu_pid: QEMU process PID
- * @hpa: Host Physical Address
- * @psize: page size
- * @use_kpageflags: whether to query kpageflags
- * @is_guest: whether running in guest (should be 1 since we're in guest)
- */
-/*
- * translate_hpa_to_gpa
- *
- * Translate HPA to GPA using QEMU PID by iterating through PFNs
- *
- * @qemu_pid: QEMU process PID
- * @hpa: Host Physical Address
- * @psize: page size
- * @use_kpageflags: whether to query kpageflags
- * @is_guest: whether running in guest (should be 1 since we're in guest)
- */
+/* translate_hpa_to_gpa: Translate HPA to GPA using QEMU PID by iterating through PFNs */
 static void
 translate_hpa_to_gpa(pid_t qemu_pid, uint64_t hpa, long psize, int use_kpageflags, int is_guest)
 {
@@ -668,73 +688,57 @@ translate_hpa_to_gpa(pid_t qemu_pid, uint64_t hpa, long psize, int use_kpageflag
     if (hva_base == 0) {
         errx(3, "Failed to find QEMU RAM region");
     }
-
     char path[PATH_SZ];
     int fd = -1;
     uint64_t pentry = 0;
     ssize_t bytes_read;
     int found = 0;
-
     snprintf(path, PATH_SZ, "/proc/%d/pagemap", qemu_pid);
     if ((fd = open(path, O_RDONLY)) == -1) {
         errx(4, "failed while trying to open %s -- %s", path, strerror(errno));
     }
-
     uint64_t num_pages = ram_size / psize;
     (void)fprintf(stdout, "HPA: 0x%" PRIx64 "\n", hpa);
     (void)fprintf(stdout, "Target PFN: %" PRIu64 " (0x%" PRIx64 ")\n", target_pfn, target_pfn);
     (void)fprintf(stdout, "HVA base: 0x%" PRIx64 "\n", hva_base);
     (void)fprintf(stdout, "RAM size: 0x%" PRIx64 " (%" PRIu64 " pages)\n", ram_size, num_pages);
     (void)fprintf(stdout, "Iterating through %" PRIu64 " PFNs...\n", num_pages);
-
-    // Iterate through each page in the QEMU RAM region
     for (uint64_t i = 0; i < num_pages; i++) {
         uint64_t hva = hva_base + i * psize;
         uint64_t page_num = hva / psize;
         off_t offset = page_num * sizeof(uint64_t);
-
         if (lseek(fd, offset, SEEK_SET) == -1) {
             (void)close(fd);
             errx(5, "failed while trying to seek in pagemap -- %s", strerror(errno));
         }
-
         bytes_read = read(fd, &pentry, sizeof(uint64_t));
         if (bytes_read != sizeof(uint64_t)) {
             (void)close(fd);
             errx(6, "failed while trying to read pagemap entry -- %s", strerror(errno));
         }
-
-        // Check if this page is present and has our target PFN
         if ((pentry & PRESENT_MASK) && ((pentry & PFN_MASK) == target_pfn)) {
-            uint64_t gpa = i * psize;  // GPA is simply the index * page_size
+            uint64_t gpa = i * psize;
             uint64_t offset_in_page = hpa % psize;
             uint64_t full_gpa = gpa + offset_in_page;
-
             (void)fprintf(stdout, "\n*** MATCH FOUND ***\n");
             (void)fprintf(stdout, "HVA: 0x%" PRIx64 "\n", hva);
             (void)fprintf(stdout, "Page index: %" PRIu64 "\n", i);
             (void)fprintf(stdout, "GPA (page-aligned): 0x%" PRIx64 "\n", gpa);
             (void)fprintf(stdout, "Offset in page: 0x%" PRIx64 "\n", offset_in_page);
             (void)fprintf(stdout, "Full GPA: 0x%" PRIx64 "\n", full_gpa);
-
             found = 1;
-
             if (use_kpageflags) {
                 (void)fprintf(stdout, "\n");
-                query_kpageflags(target_pfn, psize, 0);  /* is_guest=0 because this is host physical memory */
+                query_kpageflags(target_pfn, psize, 0);
             }
             break;
         }
-
-        // Progress indicator for large scans
         if ((i + 1) % 100000 == 0 || i == num_pages - 1) {
             (void)fprintf(stdout, "Scanned %" PRIu64 "/%" PRIu64 " pages (%.1f%%)\n",
                          i + 1, num_pages, (double)(i + 1) / num_pages * 100);
         }
     }
-
     (void)close(fd);
-
     if (!found) {
         warnx("No matching GPA found for HPA 0x%" PRIx64, hpa);
         warnx("Possible reasons:");
@@ -745,161 +749,330 @@ translate_hpa_to_gpa(pid_t qemu_pid, uint64_t hpa, long psize, int use_kpageflag
     }
 }
 
-/*
- * getPAGEMAP
- *
- * read the pagemap of a particular process
- *
- * @argc:      number of command-line options
- * @argv:      command-line options
- * return      0: success
- *             1: illegal option, missing argument
- *             2: failed while trying to read the page size
- *             3: invalid pid or virt parameter
- *             4: failed while trying to open /proc/<pid>/pagemap
- *             5: failed while trying to seek in /proc/<pid>/pagemap
- *             6: failed while trying to read a pagemap entry
- *             7: failed while trying to access /proc/kpageflags
- */
+/* Batch translation for multiple addresses */
+static void
+batch_translate_gpa_to_hpa(pid_t qemu_pid, const char *gpa_list_file, long psize)
+{
+    FILE *fp = fopen(gpa_list_file, "r");
+    if (!fp) {
+        warnx("Cannot open GPA list file: %s", gpa_list_file);
+        return;
+    }
+    
+    char line[256];
+    uint64_t hva_base = find_qemu_ram_region(qemu_pid, NULL);
+    
+    if (hva_base == 0) {
+        fclose(fp);
+        errx(3, "Failed to find QEMU RAM base");
+    }
+    
+    printf("=== Batch GPA to HPA Translation ===\n");
+    printf("Using QEMU PID: %d\n", qemu_pid);
+    printf("HVA base: 0x%016" PRIx64 "\n", hva_base);
+    printf("\n");
+    
+    while (fgets(line, sizeof(line), fp)) {
+        uint64_t gpa;
+        if (sscanf(line, "%" SCNx64, &gpa) == 1) {
+            uint64_t gpa_page_aligned = gpa & ~((uint64_t)(psize - 1));
+            uint64_t offset_in_page = gpa & ((uint64_t)(psize - 1));
+            uint64_t hva = hva_base + gpa_page_aligned + offset_in_page;
+            uint64_t pfn = querypmap(qemu_pid, hva, psize, 0, 0);
+            
+            if (pfn != 0) {
+                printf("GPA: 0x%016" PRIx64 " -> HPA: 0x%016" PRIx64 "\n", 
+                       gpa, pfn * psize + offset_in_page);
+            } else {
+                printf("GPA: 0x%016" PRIx64 " -> [NOT MAPPED]\n", gpa);
+            }
+        }
+    }
+    fclose(fp);
+}
+
+/* Export memory mappings for scripting */
+static void
+export_memory_mappings(pid_t pid, const char *output_format)
+{
+    char path[PATH_SZ];
+    FILE *fp;
+    char line[1024];
+    
+    snprintf(path, PATH_SZ, "/proc/%d/maps", pid);
+    fp = fopen(path, "r");
+    if (!fp) {
+        warnx("Cannot open /proc/%d/maps", pid);
+        return;
+    }
+    
+    if (strcmp(output_format, "python") == 0) {
+        printf("memory_regions = [\n");
+        while (fgets(line, sizeof(line), fp)) {
+            uint64_t start, end;
+            char perms[5], pathname[1024] = {0};
+            if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %4s %*s %*s %*s %1023[^\n]",
+                      &start, &end, perms, pathname) >= 3) {
+                printf("    {'start': 0x%016" PRIx64 ", 'end': 0x%016" PRIx64 ", 'perms': '%s', 'path': '%s'},\n",
+                       start, end, perms, pathname[0] ? pathname : "[anon]");
+            }
+        }
+        printf("]\n");
+    } else if (strcmp(output_format, "json") == 0) {
+        printf("{\"memory_regions\": [\n");
+        int first = 1;
+        while (fgets(line, sizeof(line), fp)) {
+            uint64_t start, end;
+            char perms[5], pathname[1024] = {0};
+            if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %4s %*s %*s %*s %1023[^\n]",
+                      &start, &end, perms, pathname) >= 3) {
+                if (!first) printf(",\n");
+                printf("  {\"start\": \"0x%016" PRIx64 "\", \"end\": \"0x%016" PRIx64 "\", \"perms\": \"%s\", \"path\": \"%s\"}",
+                       start, end, perms, pathname[0] ? pathname : "[anon]");
+                first = 0;
+            }
+        }
+        printf("\n]}\n");
+    } else {
+        /* Default shell format */
+        while (fgets(line, sizeof(line), fp)) {
+            printf("%s", line);
+        }
+    }
+    fclose(fp);
+}
+
+/* Main entry */
 int
 main(int argc, char **argv)
 {
-        long    psize;          /* page size            */
-        pid_t   pid     = -1;   /* pid                  */
-        uint64_t        vaddr   = 0;    /* virtual address      */
-        uint64_t        pfn_direct = 0; /* direct PFN query     */
-        uint64_t        aligned_vaddr;  /* page-aligned address */
-        int             use_kpageflags = 0;     /* use kpageflags flag */
-        int             direct_pfn_mode = 0;    /* direct PFN mode */
-        pid_t   qemu_pid = -1;  /* QEMU pid             */
-        uint64_t        gpa     = 0;    /* guest physical address */
-        int             translate_gpa_mode = 0; /* translate GPA mode   */
-        uint64_t        hpa     = 0;    /* host physical address */
-        int             translate_hpa_mode = 0; /* translate HPA mode   */
-        int             is_guest = is_kvm_guest(); /* detect if guest */
+    long    psize;
+    pid_t   pid     = -1;
+    uint64_t        vaddr   = 0;
+    uint64_t        pfn_direct = 0;
+    uint64_t        aligned_vaddr;
+    int             use_kpageflags = 0;
+    int             direct_pfn_mode = 0;
+    pid_t   qemu_pid = -1;
+    uint64_t        gpa     = 0;
+    int             translate_gpa_mode = 0;
+    uint64_t        hpa     = 0;
+    int             translate_hpa_mode = 0;
+    int             is_guest = is_kvm_guest();
 
-        /* getopt stuff */
-        int     opt;            /* option               */
-        int    long_opt_indx    = 0;    /* long option index    */
+    int scan_flag_mode = 0, scan_mmio_mode = 0, output_script = 0;
+    int auto_qemu_mode = 0, batch_gpa_mode = 0, export_maps_mode = 0;
+    int find_symbol_mode = 0, scan_pattern_mode = 0;
+    unsigned char flagval[32] = {0};
+    size_t flaglen = 0;
+    uint64_t mmio_start = 0, mmio_end = 0, mmio_step = 0;
+    char *batch_gpa_file = NULL;
+    char *export_maps_format = NULL;
+    char *pattern_file = NULL;
+    uint64_t find_symbol_addr = 0;
 
-        /* long options */
-        struct option long_options[] = {
-               {"pid",          1, NULL, 'p'},  /* -p / --pid           */
-               {"virt",         1, NULL, 'a'},  /* -a / --virt          */
-               {"pfn",          1, NULL, 'f'},  /* -f / --pfn           */
-               {"kpageflags",   0, NULL, 'k'},  /* -k / --kpageflags    */
-               {"qemu-pid",     1, NULL, 'q'},  /* -q / --qemu-pid      */
-               {"gpa",          1, NULL, 'g'},  /* -g / --gpa           */
-               {"hpa",          1, NULL, 'H'},  /* -H / --hpa           */
-               {"help",         0, NULL, 'h'},  /* -h / --help          */
-               {"version",      0, NULL, 'v'},  /* -v / --version       */
-               {NULL,           0, NULL, 0}};   /* terminating item     */
+    struct option long_options[] = {
+        {"scan-flag", 1, NULL, 'F'},
+        {"scan-mmio", 3, NULL, 'M'},
+        {"scan-pattern", 1, NULL, 'P'},
+        {"output-script", 0, NULL, 'S'},
+        {"auto-qemu", 0, NULL, 'Q'},
+        {"batch-gpa", 1, NULL, 'B'},
+        {"export-maps", 1, NULL, 'E'},
+        {"find-symbol", 1, NULL, 's'},
+        {"pid",          1, NULL, 'p'},
+        {"virt",         1, NULL, 'a'},
+        {"pfn",          1, NULL, 'f'},
+        {"kpageflags",   0, NULL, 'k'},
+        {"qemu-pid",     1, NULL, 'q'},
+        {"gpa",          1, NULL, 'g'},
+        {"hpa",          1, NULL, 'H'},
+        {"help",         0, NULL, 'h'},
+        {"version",      0, NULL, 'v'},
+        {NULL,           0, NULL, 0}
+    };
 
-        /* arguments parsing */
-        while ((opt = getopt_long(argc, argv, ":hvkp:a:f:q:g:H:", long_options,
-                                        &long_opt_indx)) != -1) {
-               switch(opt) {
-                case 'p': /* -p / --pid */
-                        pid     = (pid_t)strtol(optarg, NULL, BASE10);
-                        break;
-                case 'a': /* -a / --virt */
-                        vaddr   = (uint64_t)strtoull(optarg, NULL, BASE16);
-                        break;
-                case 'f': /* -f / --pfn */
-                        pfn_direct = (uint64_t)strtoull(optarg, NULL, BASE16);
-                        direct_pfn_mode = 1;
-                        break;
-                case 'q': /* -q / --qemu-pid */
-                        qemu_pid = (pid_t)strtol(optarg, NULL, BASE10);
-                        break;
-                case 'g': /* -g / --gpa */
-                        gpa     = (uint64_t)strtoull(optarg, NULL, BASE16);
-                        translate_gpa_mode = 1;
-                        break;
-                case 'H': /* -H / --hpa */
-                        hpa     = (uint64_t)strtoull(optarg, NULL, BASE16);
-                        translate_hpa_mode = 1;
-                        break;
-                case 'k': /* -k / --kpageflags */
-                        use_kpageflags = 1;
-                        break;
-                case 'h': /* help */
-                        help();
-                        goto done;
-                        break;  /* not reached */
-                case 'v': /* version info */
-                        version();
-                        goto done;
-                        break;  /* not reached */
-                case '?': /* illegal option */
-                        errx(1, "illegal option -- %s",
-                                        (optind == 0) ?
-                                        argv[long_opt_indx] :
-                                        argv[optind - 1]);
-                        break;
-                case ':': /* missing argument */
-                        errx(1, "option requires an argument -- %s",
-                                        (optind == 0) ?
-                                        argv[long_opt_indx] :
-                                        argv[optind - 1]);
-                        break;
-                default: /* not reached */
-                        break; /* make the compiler happy */
-               }
+    printf("=== Enhanced PAGEMAP for KVMCTF Exploitation ===\n");
+    printf("  * Automated flag scanning modes enabled\n");
+    printf("  * Use --scan-flag <hexvalue> to scan guest RAM for host flag values\n");
+    printf("  * Use --scan-mmio <start> <end> <step> --scan-flag <hexvalue> to scan device regions\n");
+    printf("  * Use --output-script for scripting-friendly output\n");
+
+    /* First round: enhanced options */
+    int opt;
+    int long_opt_indx = 0;
+    while ((opt = getopt_long(argc, argv, "F:M:P:SQB:E:s:", long_options, &long_opt_indx)) != -1) {
+        switch (opt) {
+            case 'F':
+                scan_flag_mode = 1;
+                {
+                    const char *hex = optarg;
+                    size_t len = strlen(hex);
+                    if (len % 2 != 0 || len > sizeof(flagval)*2) {
+                        fprintf(stderr, "Flag value must be even hex string <= %lu chars\n", sizeof(flagval)*2);
+                        exit(1);
+                    }
+                    flaglen = len / 2;
+                    for (size_t i = 0; i < flaglen; i++) {
+                        if (sscanf(hex + 2*i, "%2hhx", &flagval[i]) != 1) {
+                            fprintf(stderr, "Invalid hex in flag value\n");
+                            exit(1);
+                        }
+                    }
+                }
+                break;
+            case 'M':
+                scan_mmio_mode = 1;
+                if (optind + 2 <= argc) {
+                    mmio_start = strtoull(argv[optind - 1], NULL, 16);
+                    mmio_end   = strtoull(argv[optind], NULL, 16);
+                    mmio_step  = strtoull(argv[optind + 1], NULL, 16);
+                }
+                break;
+            case 'P':
+                scan_pattern_mode = 1;
+                pattern_file = optarg;
+                break;
+            case 'S':
+                output_script = 1;
+                break;
+            case 'Q':
+                auto_qemu_mode = 1;
+                break;
+            case 'B':
+                batch_gpa_mode = 1;
+                batch_gpa_file = optarg;
+                break;
+            case 'E':
+                export_maps_mode = 1;
+                export_maps_format = optarg;
+                break;
+            case 's':
+                find_symbol_mode = 1;
+                find_symbol_addr = strtoull(optarg, NULL, 16);
+                break;
         }
+    }
 
-        /* get the page size */
+    /* Handle enhanced modes */
+    if (scan_pattern_mode) {
+        return scan_for_patterns("/dev/mem", pattern_file, output_script);
+    }
+    
+    if (scan_flag_mode && !scan_mmio_mode) {
+        return scan_guest_ram_for_flag(flagval, flaglen, output_script);
+    } else if (scan_flag_mode && scan_mmio_mode) {
+        return scan_mmio_for_flag(mmio_start, mmio_end, mmio_step, flagval, flaglen, output_script);
+    }
+    
+    if (export_maps_mode) {
+        if (pid == -1 && qemu_pid != -1) {
+            pid = qemu_pid;
+        }
+        if (pid == -1 && auto_qemu_mode) {
+            pid = find_qemu_processes();
+        }
+        if (pid == -1) {
+            errx(3, "Need to specify PID with -p or use --auto-qemu");
+        }
+        export_memory_mappings(pid, export_maps_format);
+        goto done;
+    }
+    
+    if (find_symbol_mode) {
+        if (pid == -1 && qemu_pid != -1) {
+            pid = qemu_pid;
+        }
+        if (pid == -1 && auto_qemu_mode) {
+            pid = find_qemu_processes();
+        }
+        if (pid == -1) {
+            errx(3, "Need to specify PID with -p or use --auto-qemu");
+        }
+        find_symbol_in_mappings(pid, find_symbol_addr, is_guest);
+        goto done;
+    }
+    
+    if (batch_gpa_mode) {
+        if (qemu_pid == -1 && auto_qemu_mode) {
+            qemu_pid = find_qemu_processes();
+        }
+        if (qemu_pid == -1) {
+            errx(3, "Need to specify QEMU PID with -q or use --auto-qemu");
+        }
         if ((psize = sysconf(_SC_PAGESIZE)) == -1)
-               errx(2, "failed while trying to read page size -- %s",
-                        strerror(errno));
+            errx(2, "failed while trying to read page size -- %s", strerror(errno));
+        batch_translate_gpa_to_hpa(qemu_pid, batch_gpa_file, psize);
+        goto done;
+    }
 
-        /* translate GPA mode */
-        if (translate_gpa_mode) {
-               if (qemu_pid == -1) {
-                       errx(3, "missing `qemu-pid' argument for GPA translation");
-               }
-               translate_gpa_to_hpa(qemu_pid, gpa, psize, use_kpageflags, is_guest);
-               goto done;
+    /* --- ORIGINAL ARGUMENT PARSING BELOW --- */
+    optind = 1; /* Reset getopt */
+    long_opt_indx = 0;
+    while ((opt = getopt_long(argc, argv, ":hvkp:a:f:q:g:H:", long_options,
+                                    &long_opt_indx)) != -1) {
+           switch(opt) {
+            case 'p': pid = (pid_t)strtol(optarg, NULL, BASE10); break;
+            case 'a': vaddr = (uint64_t)strtoull(optarg, NULL, BASE16); break;
+            case 'f': pfn_direct = (uint64_t)strtoull(optarg, NULL, BASE16); direct_pfn_mode = 1; break;
+            case 'q': qemu_pid = (pid_t)strtol(optarg, NULL, BASE10); break;
+            case 'g': gpa = (uint64_t)strtoull(optarg, NULL, BASE16); translate_gpa_mode = 1; break;
+            case 'H': hpa = (uint64_t)strtoull(optarg, NULL, BASE16); translate_hpa_mode = 1; break;
+            case 'k': use_kpageflags = 1; break;
+            case 'h': help(); goto done; break;
+            case 'v': version(); goto done; break;
+            case '?': errx(1, "illegal option -- %s", (optind == 0) ? argv[long_opt_indx] : argv[optind - 1]); break;
+            case ':': errx(1, "option requires an argument -- %s", (optind == 0) ? argv[long_opt_indx] : argv[optind - 1]); break;
+            default: break;
+           }
+    }
+
+    /* Auto-detect QEMU if requested */
+    if (auto_qemu_mode && qemu_pid == -1) {
+        qemu_pid = find_qemu_processes();
+        if (qemu_pid == -1) {
+            errx(3, "Failed to automatically detect QEMU process");
         }
+    }
 
-        /* translate HPA mode */
-        if (translate_hpa_mode) {
-               if (qemu_pid == -1) {
-                       errx(3, "missing `qemu-pid' argument for HPA translation");
-               }
-               translate_hpa_to_gpa(qemu_pid, hpa, psize, use_kpageflags, is_guest);
-               goto done;
-        }
+    if ((psize = sysconf(_SC_PAGESIZE)) == -1)
+           errx(2, "failed while trying to read page size -- %s", strerror(errno));
 
-        /* direct PFN query mode */
-        if (direct_pfn_mode) {
-               query_kpageflags(pfn_direct, psize, is_guest);
-               goto done;
-        }
+    if (translate_gpa_mode) {
+           if (qemu_pid == -1) {
+                   errx(3, "missing `qemu-pid' argument for GPA translation");
+           }
+           translate_gpa_to_hpa(qemu_pid, gpa, psize, use_kpageflags, is_guest);
+           goto done;
+    }
 
-        /* validate arguments */
-        if (pid == -1)
-               /* pid is missing */
-               errx(3, "missing `pid' argument");
-        if (pid <= 0)
-               /* invalid pid value */
-               errx(3, "invalid `pid' argument -- %d", pid);
+    if (translate_hpa_mode) {
+           if (qemu_pid == -1) {
+                   errx(3, "missing `qemu-pid' argument for HPA translation");
+           }
+           translate_hpa_to_gpa(qemu_pid, hpa, psize, use_kpageflags, is_guest);
+           goto done;
+    }
 
-        /* align the virtual address to page boundary (round down) */
-        aligned_vaddr = vaddr & ~((uint64_t)(psize - 1));
+    if (direct_pfn_mode) {
+           query_kpageflags(pfn_direct, psize, is_guest);
+           goto done;
+    }
 
-        /* check if the virtual address is page-aligned */
-        if (vaddr != aligned_vaddr) {
-               /* verbose */
-        warnx("virtual address %#" PRIx64 " is not page-aligned; converting to %#" PRIx64,
-               vaddr, aligned_vaddr);
-               /* use the aligned address */
-               vaddr = aligned_vaddr;
-        }
+    if (pid == -1)
+           errx(3, "missing `pid' argument");
+    if (pid <= 0)
+           errx(3, "invalid `pid' argument -- %d", pid);
 
-        /* query pagemap */
-        querypmap(pid, vaddr, psize, use_kpageflags, is_guest);
+    aligned_vaddr = vaddr & ~((uint64_t)(psize - 1));
+    if (vaddr != aligned_vaddr) {
+           warnx("virtual address %#" PRIx64 " is not page-aligned; converting to %#" PRIx64,
+           vaddr, aligned_vaddr);
+           vaddr = aligned_vaddr;
+    }
 
-done:   /* done; return with success */
-        return EXIT_SUCCESS;
+    querypmap(pid, vaddr, psize, use_kpageflags, is_guest);
+
+done:
+    return EXIT_SUCCESS;
 }
