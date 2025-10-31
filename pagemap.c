@@ -292,7 +292,7 @@ int scan_for_patterns(const char *path, const char *pattern_file, int output_scr
 }
 
 /*
- * find_qemu_ram_region: Find the base virtual address and size of the largest anonymous mapping in /proc/<pid>/maps
+ * find_qemu_ram_region: Find QEMU's main guest RAM mapping - IMPROVED VERSION
  */
 static uint64_t
 find_qemu_ram_region(pid_t pid, uint64_t *size_out)
@@ -303,6 +303,48 @@ find_qemu_ram_region(pid_t pid, uint64_t *size_out)
     uint64_t max_size = 0;
     uint64_t base = 0;
     int region_count = 0;
+    int total_rw_regions = 0;
+
+    // First, let's check if this is actually a QEMU process
+    char cmdline_path[PATH_SZ];
+    snprintf(cmdline_path, PATH_SZ, "/proc/%d/cmdline", pid);
+    FILE *cmdline_fp = fopen(cmdline_path, "r");
+    int is_qemu = 0;
+    if (cmdline_fp) {
+        char cmdline[1024];
+        size_t bytes_read = fread(cmdline, 1, sizeof(cmdline) - 1, cmdline_fp);
+        fclose(cmdline_fp);
+        if (bytes_read > 0) {
+            cmdline[bytes_read] = '\0';
+            // Check if this looks like QEMU
+            for (int i = 0; i < bytes_read; i++) {
+                if (strstr(cmdline + i, "qemu") || strstr(cmdline + i, "kvm")) {
+                    is_qemu = 1;
+                    break;
+                }
+                while (i < bytes_read && cmdline[i] != '\0') i++;
+            }
+        }
+    }
+
+    if (!is_qemu) {
+        printf("[!] PID %d does not appear to be a QEMU process\n", pid);
+        printf("[!] Command line: ");
+        if (cmdline_fp) {
+            char cmdline[1024];
+            fseek(cmdline_fp, 0, SEEK_SET);
+            size_t bytes_read = fread(cmdline, 1, sizeof(cmdline) - 1, cmdline_fp);
+            if (bytes_read > 0) {
+                cmdline[bytes_read] = '\0';
+                for (int i = 0; i < bytes_read && i < 200; i++) {
+                    if (cmdline[i] == '\0') printf(" ");
+                    else printf("%c", cmdline[i]);
+                }
+            }
+            fclose(cmdline_fp);
+        }
+        printf("\n");
+    }
 
     snprintf(path, PATH_SZ, "/proc/%d/maps", pid);
     fp = fopen(path, "r");
@@ -311,8 +353,10 @@ find_qemu_ram_region(pid_t pid, uint64_t *size_out)
         return 0;
     }
 
-    (void)fprintf(stdout, "Scanning /proc/%d/maps for RAM regions...\n", pid);
+    printf("[*] Scanning /proc/%d/maps for ALL anonymous RW regions...\n", pid);
+    printf("    (Looking for potential QEMU guest RAM mappings)\n\n");
 
+    // First pass: count and show ALL anonymous RW regions
     while (fgets(line, sizeof(line), fp)) {
         uint64_t start, end;
         char perms[5];
@@ -323,14 +367,58 @@ find_qemu_ram_region(pid_t pid, uint64_t *size_out)
 
         if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %4s %lx %9s %ld %1023[^\n]",
                   &start, &end, perms, &offset, dev, &inode, pathname) >= 6) {
+            
+            // Count all RW regions
+            if (strstr(perms, "rw")) {
+                total_rw_regions++;
+            }
+            
+            // Look for anonymous RW mappings (potential RAM)
             if (pathname[0] == '\0' && strstr(perms, "rw") && offset == 0) {
                 uint64_t size = end - start;
                 region_count++;
-                (void)fprintf(stdout, "  Region %d: 0x%" PRIx64 "-0x%" PRIx64 " (size: 0x%" PRIx64 ")\n",
-                            region_count, start, end, size);
+                printf("Region %d: 0x%" PRIx64 "-0x%" PRIx64 " (size: 0x%" PRIx64 " = %lu MB) %s\n",
+                      region_count, start, end, size, size / (1024 * 1024), perms);
+                
+                // For QEMU, prefer larger regions
                 if (size > max_size) {
                     max_size = size;
                     base = start;
+                }
+            }
+        }
+    }
+
+    printf("\n[*] Found %d anonymous RW regions (out of %d total RW regions)\n", 
+           region_count, total_rw_regions);
+
+    // If we didn't find any anonymous RW regions, show all RW regions
+    if (region_count == 0) {
+        printf("[!] No anonymous RW regions found. Showing all RW regions:\n");
+        rewind(fp);
+        region_count = 0;
+        while (fgets(line, sizeof(line), fp)) {
+            uint64_t start, end;
+            char perms[5];
+            long offset;
+            char dev[10];
+            long inode;
+            char pathname[1024] = {0};
+
+            if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %4s %lx %9s %ld %1023[^\n]",
+                      &start, &end, perms, &offset, dev, &inode, pathname) >= 6) {
+                
+                if (strstr(perms, "rw")) {
+                    region_count++;
+                    const char *type = pathname[0] ? pathname : "[anon]";
+                    printf("RW Region %d: 0x%" PRIx64 "-0x%" PRIx64 " (size: 0x%" PRIx64 " = %lu MB) %s %s\n",
+                          region_count, start, end, end - start, (end - start) / (1024 * 1024), perms, type);
+                    
+                    // For potential QEMU RAM, prefer large anonymous regions
+                    if (pathname[0] == '\0' && (end - start) > max_size) {
+                        max_size = end - start;
+                        base = start;
+                    }
                 }
             }
         }
@@ -340,14 +428,25 @@ find_qemu_ram_region(pid_t pid, uint64_t *size_out)
 
     if (base == 0) {
         warnx("No suitable RAM region found in /proc/%d/maps", pid);
-        warnx("Looking for large anonymous rw mappings with offset 0");
-    } else {
-        (void)fprintf(stdout, "Selected largest RAM region: 0x%" PRIx64 "-0x%" PRIx64 " (size: 0x%" PRIx64 ")\n",
-                     base, base + max_size, max_size);
+        if (is_qemu) {
+            warnx("QEMU process detected but no large anonymous RW mapping found");
+            warnx("QEMU might be using file-backed memory or different mapping strategy");
+        }
+        return 0;
+    }
+
+    printf("\n[+] Selected RAM region: 0x%" PRIx64 "-0x%" PRIx64 " (size: 0x%" PRIx64 " = %lu MB)\n",
+          base, base + max_size, max_size, max_size / (1024 * 1024));
+    
+    if (max_size < QEMU_RAM_REGION_MIN_SIZE) {
+        printf("[!] Warning: Selected region is smaller than typical QEMU RAM (%lu MB < %lu MB)\n",
+              max_size / (1024 * 1024), QEMU_RAM_REGION_MIN_SIZE / (1024 * 1024));
+        if (is_qemu) {
+            printf("[!] This might not be the main guest RAM region\n");
+        }
     }
 
     if (size_out) *size_out = max_size;
-
     return base;
 }
 
