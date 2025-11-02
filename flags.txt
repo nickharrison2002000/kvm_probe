@@ -5,9 +5,9 @@
         | ----------- |---------------------|             |---|---|
         |             |                     |             |   |   |
       #virt          #id                  #phys             #phys
-ffffffff82b5ee00 D rce_flag       =>    0x695ee00    =>   0x????????
-ffffffff82b5ee10 D read_flag      =>    0x695ee10    =>   0x????????
-ffffffff826279a8 D write_flag     =>    0x64279a8    =>   0x????????
+ffffffff82b5ee00 D rce_flag       =>    0x695ee00    =>   0xf65ee00(possibly)
+ffffffff82b5ee10 D read_flag      =>    0x695ee10    =>   0xf65ee10(possibly)
+ffffffff826279a8 D write_flag     =>    0x64279a8    =>   0xf6279a8
 
 [*] hex
   100000000000000044434241efbeadde  
