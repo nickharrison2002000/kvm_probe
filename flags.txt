@@ -32,3 +32,5 @@ ffffffff826279a8 D write_flag     =>    0x64279a8    =>   0x????????
 [*] DOS 50k | hypercall #103
   # induce a null-ptr-deref KASAN violation
 
+[*] Test new gold command
+kvm_prober scanhostphys 0xf6279a8 0x777f72b5ee00 4096 --gold
