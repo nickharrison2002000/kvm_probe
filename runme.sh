@@ -107,6 +107,7 @@ kvm_prober readkvmem $CANARY_ADDR 64
 sleep 5
 echo "[*] Write flags default value"
 echo "deadbeef41424344"
+echo "with little endian: 44434241efbeadde"
 
 echo "[*] Checking potential addresses for flags"
 
