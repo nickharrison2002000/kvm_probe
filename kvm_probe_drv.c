@@ -214,8 +214,6 @@ static long force_hypercall(void) {
     u64 start = ktime_get_ns();
     ret = kvm_hypercall0(KVM_HC_VAPIC_POLL_IRQ);
     u64 end = ktime_get_ns();
-    printk(KERN_INFO "%s: HYPERCALL executed | latency=%llu ns | ret=%ld\n",
-           DRIVER_NAME, end - start, ret);
     return ret;
 }
 
@@ -242,8 +240,6 @@ static long do_hypercall(struct hypercall_args *args) {
     }
 
     u64 end = ktime_get_ns();
-    printk(KERN_INFO "%s: HYPERCALL(%lu) executed | latency=%llu ns | ret=%ld\n",
-           DRIVER_NAME, nr, end - start, ret);
     return ret;
 }
 
@@ -312,8 +308,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
     unsigned long len_to_copy;
     unsigned char *k_mmio_buffer = NULL;
 
-    printk(KERN_CRIT "%s: IOCTL ENTRY! cmd=0x%x, arg=0x%lx. ktime=%llu\n",
-           DRIVER_NAME, cmd, arg, ktime_get_ns());
 
     switch (cmd) {
         case IOCTL_READ_PORT:
@@ -456,8 +450,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             if (copy_to_user(req.user_buffer, (void *)req.host_addr, req.length))
                 return -EFAULT;
             
-            printk(KERN_INFO "%s: READ_HOST_MEM: host_addr=0x%lx, length=%lu\n", 
-                   DRIVER_NAME, req.host_addr, req.length);
             force_hypercall();
             break;
         }
@@ -481,8 +473,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             memcpy((void *)req.host_addr, tmp, req.length);
             kfree(tmp);
             
-            printk(KERN_INFO "%s: WRITE_HOST_MEM: host_addr=0x%lx, length=%lu\n", 
-                   DRIVER_NAME, req.host_addr, req.length);
             force_hypercall();
             break;
         }
@@ -516,8 +506,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             kfree(kbuf);
             iounmap(mapped);
             
-            printk(KERN_INFO "%s: READ_HOST_PHYS: host_phys=0x%lx, length=%lu\n", 
-                   DRIVER_NAME, req.host_phys_addr, req.length);
             force_hypercall();
             break;
         }
@@ -551,8 +539,6 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             kfree(kbuf);
             iounmap(mapped);
             
-            printk(KERN_INFO "%s: WRITE_HOST_PHYS: host_phys=0x%lx, length=%lu\n", 
-                   DRIVER_NAME, req.host_phys_addr, req.length);
             force_hypercall();
             break;
         }
