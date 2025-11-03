@@ -10,8 +10,11 @@
 #include <linux/virtio_ids.h>
 #include <sys/mman.h>
 #include <ctype.h>
+#include <pthread.h>
+#include <signal.h>
 
 #define DEVICE_PATH "/dev/kvm_probe_dev"
+#define MAX_THREADS 16
 
 #define IOCTL_READ_PORT          0x1001
 #define IOCTL_WRITE_PORT         0x1002
@@ -120,6 +123,29 @@ static const char *GOLD_HEX_STRINGS[GOLD_HEX_STRINGS_COUNT] = {
     "44434241efbeadde"
 };
 
+// Thread management structures
+typedef struct {
+    int fd;
+    unsigned long start_addr;
+    unsigned long end_addr;
+    unsigned long step;
+    int thread_id;
+    int gold_scan;
+    int *gold_found_any;
+    pthread_mutex_t *mutex;
+} scan_thread_args_t;
+
+// Global thread control
+volatile int stop_scan = 0;
+
+// Function declarations
+void *scan_host_phys_thread(void *args);
+void *scan_host_mem_thread(void *args);
+int launch_parallel_scan(int fd, unsigned long start, unsigned long end, 
+                        unsigned long step, int gold_scan, int num_threads, 
+                        int is_physical);
+void handle_signal(int sig);
+
 void print_usage(char *prog_name) {
     fprintf(stderr, "  Usage: %s <command> [args...]\n", prog_name);
     fprintf(stderr, "  Commands:\n");
@@ -153,9 +179,10 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  attachvq <device_id> <vq_pfn> <queue_index>\n");
     fprintf(stderr, "  trigvq <device_id>\n");
     fprintf(stderr, "  scanphys <start_addr_hex> <end_addr_hex> <step_bytes>\n");
-    fprintf(stderr, "  scanhostmem <start_host_vaddr_hex> <end_host_vaddr_hex> <step_bytes> [--gold]\n");
-    fprintf(stderr, "  scanhostphys <start_host_paddr_hex> <end_host_paddr_hex> <step_bytes> [--gold]\n");
+    fprintf(stderr, "  scanhostmem <start_host_vaddr_hex> <end_host_vaddr_hex> <step_bytes> [--gold] [--threads N]\n");
+    fprintf(stderr, "  scanhostphys <start_host_paddr_hex> <end_host_paddr_hex> <step_bytes> [--gold] [--threads N]\n");
     fprintf(stderr, "  --gold flag: Only output if gold patterns found (reduces noise)\n");
+    fprintf(stderr, "  --threads N: Use N threads for scanning (default: 4, max: 16)\n");
     fprintf(stderr, "  Virtio device IDs: NET=1, BLOCK=2, CONSOLE=3\n");
 }
 
@@ -263,7 +290,186 @@ int check_gold_patterns(const unsigned char *data, unsigned long length, unsigne
     return found;
 }
 
+// Signal handler for graceful shutdown
+void handle_signal(int sig) {
+    printf("\n[!] Received signal %d, stopping scan...\n", sig);
+    stop_scan = 1;
+}
+
+void *scan_host_phys_thread(void *args) {
+    scan_thread_args_t *targs = (scan_thread_args_t *)args;
+    unsigned char *buf = malloc(targs->step);
+    if (!buf) {
+        fprintf(stderr, "Thread %d: malloc failed\n", targs->thread_id);
+        return NULL;
+    }
+
+    unsigned long range_per_thread = (targs->end_addr - targs->start_addr) / MAX_THREADS;
+    unsigned long my_start = targs->start_addr + (targs->thread_id * range_per_thread);
+    unsigned long my_end = (targs->thread_id == MAX_THREADS - 1) ? 
+                          targs->end_addr : my_start + range_per_thread;
+
+    printf("Thread %d: Scanning phys range 0x%lx - 0x%lx\n", 
+           targs->thread_id, my_start, my_end);
+
+    for (unsigned long addr = my_start; addr < my_end && !stop_scan; addr += targs->step) {
+        struct host_phys_access req = {0};
+        req.host_phys_addr = addr;
+        req.length = targs->step;
+        req.user_buffer = buf;
+
+        if (ioctl(targs->fd, IOCTL_READ_HOST_PHYS, &req) < 0) {
+            if (!targs->gold_scan) {
+                pthread_mutex_lock(targs->mutex);
+                printf("0x%lX: ERROR\n", addr);
+                pthread_mutex_unlock(targs->mutex);
+            }
+        } else {
+            if (targs->gold_scan) {
+                int gold_found = check_gold_patterns(buf, targs->step, addr);
+                if (gold_found) {
+                    pthread_mutex_lock(targs->mutex);
+                    *(targs->gold_found_any) = 1;
+                    pthread_mutex_unlock(targs->mutex);
+                }
+            } else {
+                pthread_mutex_lock(targs->mutex);
+                printf("0x%lX:\nHex: ", addr);
+                for (unsigned long i = 0; i < targs->step; ++i) {
+                    printf("%02X", buf[i]);
+                    if ((i + 1) % 16 == 0 && i + 1 < targs->step) printf(" ");
+                }
+                printf("\nASCII: ");
+                for (unsigned long i = 0; i < targs->step; ++i) {
+                    unsigned char c = buf[i];
+                    printf("%c", (c >= 32 && c <= 126) ? c : '.');
+                    if ((i + 1) % 16 == 0 && i + 1 < targs->step) printf(" ");
+                }
+                printf("\n\n");
+                pthread_mutex_unlock(targs->mutex);
+            }
+        }
+    }
+
+    free(buf);
+    printf("Thread %d: Finished\n", targs->thread_id);
+    return NULL;
+}
+
+void *scan_host_mem_thread(void *args) {
+    scan_thread_args_t *targs = (scan_thread_args_t *)args;
+    unsigned char *buf = malloc(targs->step);
+    if (!buf) {
+        fprintf(stderr, "Thread %d: malloc failed\n", targs->thread_id);
+        return NULL;
+    }
+
+    unsigned long range_per_thread = (targs->end_addr - targs->start_addr) / MAX_THREADS;
+    unsigned long my_start = targs->start_addr + (targs->thread_id * range_per_thread);
+    unsigned long my_end = (targs->thread_id == MAX_THREADS - 1) ? 
+                          targs->end_addr : my_start + range_per_thread;
+
+    printf("Thread %d: Scanning virt range 0x%lx - 0x%lx\n", 
+           targs->thread_id, my_start, my_end);
+
+    for (unsigned long addr = my_start; addr < my_end && !stop_scan; addr += targs->step) {
+        struct host_mem_access req = {0};
+        req.host_addr = addr;
+        req.length = targs->step;
+        req.user_buffer = buf;
+
+        if (ioctl(targs->fd, IOCTL_READ_HOST_MEM, &req) < 0) {
+            if (!targs->gold_scan) {
+                pthread_mutex_lock(targs->mutex);
+                printf("0x%lX: ERROR\n", addr);
+                pthread_mutex_unlock(targs->mutex);
+            }
+        } else {
+            if (targs->gold_scan) {
+                int gold_found = check_gold_patterns(buf, targs->step, addr);
+                if (gold_found) {
+                    pthread_mutex_lock(targs->mutex);
+                    *(targs->gold_found_any) = 1;
+                    pthread_mutex_unlock(targs->mutex);
+                }
+            } else {
+                pthread_mutex_lock(targs->mutex);
+                printf("0x%lX:\nHex: ", addr);
+                for (unsigned long i = 0; i < targs->step; ++i) {
+                    printf("%02X", buf[i]);
+                    if ((i + 1) % 16 == 0 && i + 1 < targs->step) printf(" ");
+                }
+                printf("\nASCII: ");
+                for (unsigned long i = 0; i < targs->step; ++i) {
+                    unsigned char c = buf[i];
+                    printf("%c", (c >= 32 && c <= 126) ? c : '.');
+                    if ((i + 1) % 16 == 0 && i + 1 < targs->step) printf(" ");
+                }
+                printf("\n\n");
+                pthread_mutex_unlock(targs->mutex);
+            }
+        }
+    }
+
+    free(buf);
+    printf("Thread %d: Finished\n", targs->thread_id);
+    return NULL;
+}
+
+int launch_parallel_scan(int fd, unsigned long start, unsigned long end, 
+                        unsigned long step, int gold_scan, int num_threads, 
+                        int is_physical) {
+    
+    if (num_threads > MAX_THREADS) num_threads = MAX_THREADS;
+    if (num_threads < 1) num_threads = 1;
+
+    printf("[+] Starting parallel scan with %d threads\n", num_threads);
+    printf("[+] Range: 0x%lx - 0x%lx (step: 0x%lx)\n", start, end, step);
+    
+    pthread_t threads[MAX_THREADS];
+    scan_thread_args_t thread_args[MAX_THREADS];
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    int gold_found_any = 0;
+    stop_scan = 0;
+
+    // Create threads
+    for (int i = 0; i < num_threads; i++) {
+        thread_args[i].fd = fd;
+        thread_args[i].start_addr = start;
+        thread_args[i].end_addr = end;
+        thread_args[i].step = step;
+        thread_args[i].thread_id = i;
+        thread_args[i].gold_scan = gold_scan;
+        thread_args[i].gold_found_any = &gold_found_any;
+        thread_args[i].mutex = &mutex;
+
+        if (is_physical) {
+            pthread_create(&threads[i], NULL, scan_host_phys_thread, &thread_args[i]);
+        } else {
+            pthread_create(&threads[i], NULL, scan_host_mem_thread, &thread_args[i]);
+        }
+    }
+
+    // Wait for all threads to complete
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    pthread_mutex_destroy(&mutex);
+
+    if (gold_scan && !gold_found_any) {
+        printf("No gold patterns found in scanned range.\n");
+    }
+
+    printf("[+] Parallel scan completed\n");
+    return gold_found_any;
+}
+
 int main(int argc, char *argv[]) {
+    // Setup signal handling
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
@@ -672,8 +878,17 @@ int main(int argc, char *argv[]) {
         if (argc < 5) { print_usage(argv[0]); close(fd); return 1; }
         
         int gold_scan = 0;
-        if (argc >= 6 && strcmp(argv[5], "--gold") == 0) {
-            gold_scan = 1;
+        int num_threads = 4; // Default threads
+        
+        // Parse optional arguments
+        for (int i = 5; i < argc; i++) {
+            if (strcmp(argv[i], "--gold") == 0) {
+                gold_scan = 1;
+            } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+                num_threads = atoi(argv[++i]);
+                if (num_threads < 1) num_threads = 1;
+                if (num_threads > MAX_THREADS) num_threads = MAX_THREADS;
+            }
         }
         
         unsigned long start = strtoul(argv[2], NULL, 16);
@@ -686,60 +901,23 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         
-        unsigned char *buf = malloc(step);
-        if (!buf) {
-            perror("malloc for scanhostmem buffer");
-            close(fd);
-            return 1;
-        }
-        
-        int gold_found_any = 0;
-        
-        for (unsigned long addr = start; addr < end; addr += step) {
-            struct host_mem_access req = {0};
-            req.host_addr = addr;
-            req.length = step;
-            req.user_buffer = buf;
-            
-            if (ioctl(fd, IOCTL_READ_HOST_MEM, &req) < 0) {
-                if (!gold_scan) {
-                    printf("0x%lX: ERROR\n", addr);
-                }
-            } else {
-                if (gold_scan) {
-                    int gold_found = check_gold_patterns(buf, step, addr);
-                    if (gold_found) {
-                        gold_found_any = 1;
-                    }
-                } else {
-                    printf("0x%lX:\nHex: ", addr);
-                    for (unsigned long i = 0; i < step; ++i) {
-                        printf("%02X", buf[i]);
-                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
-                    }
-                    printf("\nASCII: ");
-                    for (unsigned long i = 0; i < step; ++i) {
-                        unsigned char c = buf[i];
-                        printf("%c", (c >= 32 && c <= 126) ? c : '.');
-                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
-                    }
-                    printf("\n\n");
-                }
-            }
-        }
-        
-        if (gold_scan && !gold_found_any) {
-            printf("No gold patterns found in scanned range.\n");
-        }
-        
-        free(buf);
+        launch_parallel_scan(fd, start, end, step, gold_scan, num_threads, 0);
 
     } else if (strcmp(cmd, "scanhostphys") == 0) {
         if (argc < 5) { print_usage(argv[0]); close(fd); return 1; }
         
         int gold_scan = 0;
-        if (argc >= 6 && strcmp(argv[5], "--gold") == 0) {
-            gold_scan = 1;
+        int num_threads = 4; // Default threads
+        
+        // Parse optional arguments
+        for (int i = 5; i < argc; i++) {
+            if (strcmp(argv[i], "--gold") == 0) {
+                gold_scan = 1;
+            } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+                num_threads = atoi(argv[++i]);
+                if (num_threads < 1) num_threads = 1;
+                if (num_threads > MAX_THREADS) num_threads = MAX_THREADS;
+            }
         }
         
         unsigned long start = strtoul(argv[2], NULL, 16);
@@ -752,53 +930,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         
-        unsigned char *buf = malloc(step);
-        if (!buf) {
-            perror("malloc for scanhostphys buffer");
-            close(fd);
-            return 1;
-        }
-        
-        int gold_found_any = 0;
-        
-        for (unsigned long addr = start; addr < end; addr += step) {
-            struct host_phys_access req = {0};
-            req.host_phys_addr = addr;
-            req.length = step;
-            req.user_buffer = buf;
-            
-            if (ioctl(fd, IOCTL_READ_HOST_PHYS, &req) < 0) {
-                if (!gold_scan) {
-                    printf("0x%lX: ERROR\n", addr);
-                }
-            } else {
-                if (gold_scan) {
-                    int gold_found = check_gold_patterns(buf, step, addr);
-                    if (gold_found) {
-                        gold_found_any = 1;
-                    }
-                } else {
-                    printf("0x%lX:\nHex: ", addr);
-                    for (unsigned long i = 0; i < step; ++i) {
-                        printf("%02X", buf[i]);
-                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
-                    }
-                    printf("\nASCII: ");
-                    for (unsigned long i = 0; i < step; ++i) {
-                        unsigned char c = buf[i];
-                        printf("%c", (c >= 32 && c <= 126) ? c : '.');
-                        if ((i + 1) % 16 == 0 && i + 1 < step) printf(" ");
-                    }
-                    printf("\n\n");
-                }
-            }
-        }
-        
-        if (gold_scan && !gold_found_any) {
-            printf("No gold patterns found in scanned range.\n");
-        }
-        
-        free(buf);
+        launch_parallel_scan(fd, start, end, step, gold_scan, num_threads, 1);
 
     } else if (strcmp(cmd, "writeva") == 0) {
         if (argc != 4) { print_usage(argv[0]); close(fd); return 1; }
