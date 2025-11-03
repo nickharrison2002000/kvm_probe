@@ -117,10 +117,10 @@ struct host_phys_access {
 // Gold pattern constants
 #define GOLD_FLAG_STRINGS_COUNT 4
 static const char *GOLD_ASCII_STRINGS[GOLD_FLAG_STRINGS_COUNT] = {
-    "write_flag",
-    "v6.1.74",
-    "/root/rce_flag",
-    "kvmctf"
+    "/home/",
+    "/root/",
+    "passwd",
+    "/root/rce_flag"
 };
 
 #define GOLD_HEX_STRINGS_COUNT 4
