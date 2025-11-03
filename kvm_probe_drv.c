@@ -505,8 +505,7 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             
             kfree(kbuf);
             iounmap(mapped);
-            
-            force_hypercall();
+
             break;
         }
 
