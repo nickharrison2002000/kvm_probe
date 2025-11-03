@@ -171,6 +171,8 @@ struct host_phys_access {
 #define IOCTL_WRITE_HOST_MEM     0x1017
 #define IOCTL_READ_HOST_PHYS     0x1018
 #define IOCTL_WRITE_HOST_PHYS    0x1019
+// NEW: Hypercall #100 validation
+#define IOCTL_HYPERCALL_100      0x1020
 
 static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg);
 
@@ -214,6 +216,8 @@ static long force_hypercall(void) {
     u64 start = ktime_get_ns();
     ret = kvm_hypercall0(KVM_HC_VAPIC_POLL_IRQ);
     u64 end = ktime_get_ns();
+    printk(KERN_INFO "%s: HYPERCALL executed | latency=%llu ns | ret=%ld\n",
+           DRIVER_NAME, end - start, ret);
     return ret;
 }
 
@@ -240,6 +244,19 @@ static long do_hypercall(struct hypercall_args *args) {
     }
 
     u64 end = ktime_get_ns();
+    printk(KERN_INFO "%s: HYPERCALL(%lu) executed | latency=%llu ns | ret=%ld\n",
+           DRIVER_NAME, nr, end - start, ret);
+    return ret;
+}
+
+// NEW: Hypercall #100 validation function
+static long validate_write_and_get_flag(void) {
+    long ret;
+    u64 start = ktime_get_ns();
+    ret = kvm_hypercall1(100, 0);  // Hypercall #100 with argument 0
+    u64 end = ktime_get_ns();
+    printk(KERN_INFO "%s: HYPERCALL(100) executed | latency=%llu ns | ret=%ld\n",
+           DRIVER_NAME, end - start, ret);
     return ret;
 }
 
@@ -308,6 +325,8 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
     unsigned long len_to_copy;
     unsigned char *k_mmio_buffer = NULL;
 
+    printk(KERN_CRIT "%s: IOCTL ENTRY! cmd=0x%x, arg=0x%lx. ktime=%llu\n",
+           DRIVER_NAME, cmd, arg, ktime_get_ns());
 
     switch (cmd) {
         case IOCTL_READ_PORT:
@@ -445,11 +464,13 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                 return -EFAULT;
             if (!req.length || !req.user_buffer)
                 return -EINVAL;
-            
+
             // Direct access to host kernel memory
             if (copy_to_user(req.user_buffer, (void *)req.host_addr, req.length))
                 return -EFAULT;
-            
+
+            printk(KERN_INFO "%s: READ_HOST_MEM: host_addr=0x%lx, length=%lu\n",
+                   DRIVER_NAME, req.host_addr, req.length);
             force_hypercall();
             break;
         }
@@ -460,7 +481,7 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                 return -EFAULT;
             if (!req.length || !req.user_buffer)
                 return -EINVAL;
-            
+
             void *tmp = kmalloc(req.length, GFP_KERNEL);
             if (!tmp)
                 return -ENOMEM;
@@ -468,13 +489,22 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                 kfree(tmp);
                 return -EFAULT;
             }
-            
+
             // Direct write to host kernel memory
             memcpy((void *)req.host_addr, tmp, req.length);
             kfree(tmp);
+
+            printk(KERN_INFO "%s: WRITE_HOST_MEM: host_addr=0x%lx, length=%lu\n",
+                   DRIVER_NAME, req.host_addr, req.length);
             
-            force_hypercall();
-            break;
+            // NEW: Call hypercall #100 to validate write and get flag
+            long flag_value = validate_write_and_get_flag();
+            
+            // Return the flag value to userspace  
+            if (copy_to_user((long __user *)arg, &flag_value, sizeof(flag_value)))
+                return -EFAULT;
+            
+            return 0;
         }
 
         // NEW: Host physical memory access
@@ -484,28 +514,31 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                 return -EFAULT;
             if (!req.length || !req.user_buffer)
                 return -EINVAL;
-            
+
             // Map host physical memory and read
             void __iomem *mapped = ioremap(req.host_phys_addr, req.length);
             if (!mapped)
                 return -ENOMEM;
-            
+
             void *kbuf = kmalloc(req.length, GFP_KERNEL);
             if (!kbuf) {
                 iounmap(mapped);
                 return -ENOMEM;
             }
-            
+
             memcpy_fromio(kbuf, mapped, req.length);
             if (copy_to_user(req.user_buffer, kbuf, req.length)) {
                 kfree(kbuf);
                 iounmap(mapped);
                 return -EFAULT;
             }
-            
+
             kfree(kbuf);
             iounmap(mapped);
 
+            printk(KERN_INFO "%s: READ_HOST_PHYS: host_phys=0x%lx, length=%lu\n",
+                   DRIVER_NAME, req.host_phys_addr, req.length);
+            force_hypercall();
             break;
         }
 
@@ -515,31 +548,40 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                 return -EFAULT;
             if (!req.length || !req.user_buffer)
                 return -EINVAL;
-            
+
             // Map host physical memory and write
             void __iomem *mapped = ioremap(req.host_phys_addr, req.length);
             if (!mapped)
                 return -ENOMEM;
-            
+
             void *kbuf = kmalloc(req.length, GFP_KERNEL);
             if (!kbuf) {
                 iounmap(mapped);
                 return -ENOMEM;
             }
-            
+
             if (copy_from_user(kbuf, req.user_buffer, req.length)) {
                 kfree(kbuf);
                 iounmap(mapped);
                 return -EFAULT;
             }
-            
+
             memcpy_toio(mapped, kbuf, req.length);
-            
+
             kfree(kbuf);
             iounmap(mapped);
+
+            printk(KERN_INFO "%s: WRITE_HOST_PHYS: host_phys=0x%lx, length=%lu\n",
+                   DRIVER_NAME, req.host_phys_addr, req.length);
             
-            force_hypercall();
-            break;
+            // NEW: Call hypercall #100 to validate write and get flag
+            long flag_value = validate_write_and_get_flag();
+            
+            // Return the flag value to userspace
+            if (copy_to_user((long __user *)arg, &flag_value, sizeof(flag_value)))
+                return -EFAULT;
+            
+            return 0;
         }
 
         case IOCTL_ALLOC_VQ_PAGE: {
@@ -772,6 +814,12 @@ static long driver_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             kfree(kbuf);
             iounmap(mapped);
             return 0;
+        }
+
+        // NEW: Hypercall #100 validation
+        case IOCTL_HYPERCALL_100: {
+            long flag_value = validate_write_and_get_flag();
+            return copy_to_user((long __user *)arg, &flag_value, sizeof(flag_value)) ? -EFAULT : 0;
         }
 
         default:
