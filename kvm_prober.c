@@ -118,17 +118,14 @@ struct host_phys_access {
 #define GOLD_FLAG_STRINGS_COUNT 4
 static const char *GOLD_ASCII_STRINGS[GOLD_FLAG_STRINGS_COUNT] = {
     "write_flag",
-    "read_flag", 
-    "rce_flag",
-    "dcba"
+    "v6.1.74",
+    "/root/rce_flag",
+    "kvmctf"
 };
 
 #define GOLD_HEX_STRINGS_COUNT 4
 static const char *GOLD_HEX_STRINGS[GOLD_HEX_STRINGS_COUNT] = {
-    "44434241efbeadde",
-    "44342414deadbeef",
-    "deadbeef14243444",
-    "deadbeef41424344"
+    "44434241efbeadde"
 };
 
 void print_usage(char *prog_name) {
