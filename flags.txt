@@ -9,6 +9,11 @@ ffffffff82b5ee00 D rce_flag       =>    0x695ee00    =>   0xf65ee00(possibly)
 ffffffff82b5ee10 D read_flag      =>    0x695ee10    =>   0xf65ee10(possibly)
 ffffffff826279a8 D write_flag     =>    0x64279a8    =>   0xf6279a8
 
+rce_flag address w/ KASLR: 0x02b5ee00
+read_flag address w/ KASLR: 0x02b5ee10
+write_flag address w/ KASLR: 0x026279a8
+
+
 [*] hex
   100000000000000044434241efbeadde  
 [*] asci
@@ -34,3 +39,5 @@ ffffffff826279a8 D write_flag     =>    0x64279a8    =>   0xf6279a8
 
 [*] Test new gold command
 kvm_prober scanhostphys 0xf6279a8 0x777f72b5ee00 4096 --gold
+
+[*] hpa 2 gpa = 0x3B000000
