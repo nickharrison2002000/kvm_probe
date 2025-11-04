@@ -240,8 +240,6 @@ static long do_hypercall(struct hypercall_args *args) {
     }
 
     u64 end = ktime_get_ns();
-    printk(KERN_INFO "%s: HYPERCALL(%lu) executed | latency=%llu ns | ret=%ld\n",
-           DRIVER_NAME, nr, end - start, ret);
     return ret;
 }
 
