@@ -211,7 +211,7 @@ static int resolve_function_pointers(void)
     return 0;
 }
 
-static long force_hypercall(void) {
+static long validate_write_and_get_flag(void) {
     long ret;
     u64 start = ktime_get_ns();
     ret = kvm_hypercall0(KVM_HC_VAPIC_POLL_IRQ);
@@ -246,7 +246,7 @@ static long do_hypercall(struct hypercall_args *args) {
 }
 
 // NEW: Hypercall #100 validation function
-static long validate_write_and_get_flag(void) {
+static long force_hypercall(void) {
     long ret;
     u64 start = ktime_get_ns();
     ret = kvm_hypercall1(100, 0);  // Hypercall #100 with argument 0
