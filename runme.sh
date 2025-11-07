@@ -30,7 +30,7 @@ KERN_VER=$(uname -r)
 
 ### ===Install basic build tools===
 apt update -y >/dev/null
-apt install sudo git make gcc gdb tar -y >/dev/null || true
+apt install sudo git make gcc gdb tar pip xxd build-essential binutils linux-compiler-gcc-12-x86 linux-kbuild-6.1 wget -y >/dev/null || true
 apt install -f -y >/dev/null
 
 #sleep 2
@@ -51,8 +51,6 @@ wget -q https://debian.sipwise.com/debian-security/pool/main/l/linux/linux-heade
 
 ### ===Install with verification===
 sleep 2
- apt install linux-compiler-gcc-12-x86 linux-kbuild-6.1 -y
- sleep 2
 echo "[*] Installing necessary headers..."
 dpkg -i *.deb || true
 
@@ -71,16 +69,16 @@ echo "[*] host VA and PA addresses"
 echo "Write flag address: 0xffffffff826279a8    0x64279a8"
 echo "Read flag address:  0xffffffff82b5ee10    0x695ee10"
 
-sleep 2
-# Disable ASLR system-wide
-echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
-
 sleep 5
 echo "[*] Write flags default value"
 echo "deadbeef41424344"
 echo "with little endian: 44434241efbeadde"
 
-echo "HPA 2 GPA = 0x3B000000"
+echo "Potential HPA 2 GPA = 0x3B000000"
+sleep 2
+
+echo "Disabling ASLR system-wide"
+echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
 
 sleep 5
 echo "[*] Host view @ 0x3C000000"
